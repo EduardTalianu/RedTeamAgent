@@ -1,231 +1,315 @@
 #!/usr/bin/env python3
 """
-Web search tool plugin for EragAPI Chat Client.
-Allows the AI to search the web using DuckDuckGo with Google fallback.
+Robust web search tool for LLM integration.
+Tries: duckduckgo_search (DDGS / ddg), then DuckDuckGo HTML scrape, then googlesearch fallback.
+Returns a formatted string (suitable for LLM) and keeps structured results in self.last_results.
 """
-
 import re
 import time
 import random
 import requests
 from bs4 import BeautifulSoup
+import importlib
+import traceback
+import xml.etree.ElementTree as ET
 
-# Try to import DuckDuckGo search
+# Optional imports (set flags)
 try:
-    from duckduckgo_search import DDGS
+    from duckduckgo_search import DDGS, ddg  # newer versions may expose ddg
     DUCKDUCKGO_AVAILABLE = True
-except ImportError:
-    DUCKDUCKGO_AVAILABLE = False
-    print("Warning: duckduckgo-search not available. Install with: pip install duckduckgo-search==3.8.5")
-
-# Try to import Google search
+except Exception:
+    try:
+        # try to import just ddg if present
+        from duckduckgo_search import ddg
+        DDGS = None
+        DUCKDUCKGO_AVAILABLE = True
+    except Exception:
+        DUCKDUCKGO_AVAILABLE = False
 try:
     from googlesearch import search as google_search
     GOOGLE_AVAILABLE = True
-except ImportError:
+except Exception:
+    google_search = None
     GOOGLE_AVAILABLE = False
-    print("Warning: googlesearch-python not available. Install with: pip install googlesearch-python")
 
 class Web_search:
-    """Web search tool implementation."""
-    
     def __init__(self):
         self.name = "Web Search"
-        self.description = "Search the web for information using DuckDuckGo with Google fallback."
-        self.enabled = False  # This attribute is required by the GUI
-        self.max_results = 5  # Limit results to avoid too much data
-        self.last_query = None  # Store the last query for debugging
-        self.last_results = None  # Store the last results for debugging
-        self.last_search_time = 0  # Track last search time for rate limiting
-        self.min_search_interval = 5  # Minimum seconds between searches (rate limiting)
-        self.retry_count = 2  # Number of retries for failed searches
+        self.description = "Search the web using DuckDuckGo (preferred) with Google fallback."
+        self.enabled = False  # This is required by the GUI
+        self.max_results = 5
+        self.last_query = None
+        self.last_results = None   # list of dicts: {title, snippet, url}
+        self.last_search_time = 0
+        self.min_search_interval = 1.0
+        self.retry_count = 2
         self.user_agents = [
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15'
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.96 Safari/537.36'
         ]
     
     def detect_request(self, text: str):
-        """Detect if the AI is requesting to search the web."""
-        # Pattern 1: Look for explicit search commands
-        search_patterns = [
-            r'search\s+(?:for\s+)?["\']?(.+?)["\']?(?:\s+on\s+the\s+web|\s+online)?',
-            r'look\s+up\s+["\']?(.+?)["\']?',
-            r'find\s+(?:information\s+)?(?:about|on)\s+["\']?(.+?)["\']?',
-            r'what\s+(?:is|are)\s+["\']?(.+?)["\']?',
-            r'who\s+is\s+["\']?(.+?)["\']?',
-            r'when\s+(?:did|was)\s+["\']?(.+?)["\']?',
-            r'where\s+(?:is|are)\s+["\']?(.+?)["\']?',
-            r'why\s+(?:is|are)\s+["\']?(.+?)["\']?',
-            r'how\s+(?:to|do|does|did)\s+["\']?(.+?)["\']?'
-        ]
+        """Detect if the AI is requesting to execute a web search using XML format."""
+        # Look for structured XML tool invocation
+        xml_pattern = r'```xml\s*\n*\s*(<tool>.*?</tool>)\s*\n*\s*```'
+        match = re.search(xml_pattern, text, re.IGNORECASE | re.DOTALL)
         
-        for pattern in search_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                query = match.group(1).strip()
-                # Clean up the query
-                query = re.sub(r'[^\w\s]', '', query)
-                if query and len(query) > 2:  # Ensure query is meaningful
-                    return query
+        if match:
+            return self._parse_tool_command(match.group(1))
         
-        # Pattern 2: Look for questions that might need web search
-        question_patterns = [
-            r'can\s+you\s+(?:search|find|look\s+up)\s+(?:for\s+)?(.+)',
-            r'i\s+(?:need|want)\s+(?:information|to\s+know)\s+about\s+(.+)',
-            r'tell\s+me\s+about\s+(.+)'
-        ]
+        # Fallback to simpler format without code block
+        simple_pattern = r'(<tool>.*?</tool>)'
+        match = re.search(simple_pattern, text, re.IGNORECASE | re.DOTALL)
         
-        for pattern in question_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                query = match.group(1).strip()
-                # Clean up the query
-                query = re.sub(r'[^\w\s]', '', query)
-                if query and len(query) > 2:  # Ensure query is meaningful
-                    return query
+        if match:
+            return self._parse_tool_command(match.group(0))
+        
+        # Try to detect XML without proper tags
+        fallback_pattern = r'<tool>.*?</tool>'
+        match = re.search(fallback_pattern, text, re.IGNORECASE | re.DOTALL)
+        
+        if match:
+            return self._parse_tool_command(match.group(0))
+        
+        return None
+    
+    def _parse_tool_command(self, xml_str: str):
+        """Parse an XML tool command and extract parameters."""
+        try:
+            root = ET.fromstring(xml_str)
+            
+            # Validate the tool name - accept both "web_search" and "Web Search"
+            tool_name = root.find('name')
+            if tool_name is None or tool_name.text.lower() not in ['web_search', 'web search']:
+                return None
+                
+            # Extract and validate parameters
+            query = None
+            params_elem = root.find('parameters')
+            if params_elem is not None:
+                # Try the expected format: <query>value</query>
+                query_elem = params_elem.find('query')
+                if query_elem is not None and query_elem.text:
+                    query = query_elem.text.strip()
+                else:
+                    # Try alternative format: <parameter_name>query</parameter_name><parameter_value>value</parameter_value>
+                    param_names = params_elem.findall('parameter_name')
+                    param_values = params_elem.findall('parameter_value')
+                    
+                    if param_names and not param_values:
+                        # Handle case where query is directly in parameter_name
+                        if len(param_names) == 1:
+                            query = param_names[0].text.strip()
+                    else:
+                        for i, name_elem in enumerate(param_names):
+                            if i < len(param_values) and name_elem.text and name_elem.text.lower() == 'query':
+                                query = param_values[i].text.strip()
+                                break
+                    
+                    # Another alternative format: <parameter name="query">value</parameter>
+                    param_elems = params_elem.findall('parameter')
+                    for param in param_elems:
+                        if param.get('name', '').lower() == 'query' and param.text:
+                            query = param.text.strip()
+                            break
+                    
+                    # Yet another alternative: <parameter_name>actual query text</parameter_name>
+                    if not query and param_names:
+                        for name_elem in param_names:
+                            if name_elem.text and name_elem.text.lower() not in ['query', 'command']:
+                                query = name_elem.text.strip()
+                                break
+            
+            if query and len(query) > 2:
+                return query
+                    
+        except Exception as e:
+            print(f"Error parsing XML: {str(e)}")
         
         return None
     
     def execute(self, query: str) -> str:
-        """Execute a web search and return formatted results."""
-        self.last_query = query  # Store for debugging
-        
-        # Rate limiting - wait if needed
-        current_time = time.time()
-        time_since_last_search = current_time - self.last_search_time
-        if time_since_last_search < self.min_search_interval:
-            wait_time = self.min_search_interval - time_since_last_search
-            time.sleep(wait_time)
-        
+        self.last_query = query
+        # simple rate limiting
+        now = time.time()
+        if now - self.last_search_time < self.min_search_interval:
+            time.sleep(self.min_search_interval - (now - self.last_search_time))
         self.last_search_time = time.time()
-        
-        # Try DuckDuckGo first if available
+        errors = []
+        # Try DuckDuckGo library(s)
         if DUCKDUCKGO_AVAILABLE:
             for attempt in range(self.retry_count):
                 try:
-                    result = self._search_duckduckgo(query)
-                    if result and not result.startswith("Error"):
-                        self.last_results = result
-                        return result
+                    results = self._search_duckduckgo(query)
+                    if results:
+                        self.last_results = results
+                        return self._format_results(query, results)
                 except Exception as e:
-                    print(f"DuckDuckGo search attempt {attempt + 1} failed: {str(e)}")
-                    if attempt < self.retry_count - 1:
-                        time.sleep(2)  # Wait before retrying
-        
-        # If DuckDuckGo fails or not available, try Google if available
+                    errors.append(f"DuckDuckGo attempt {attempt+1} error: {e}")
+                    time.sleep(0.5)
+        # Try DuckDuckGo HTML scrape (best-effort)
+        try:
+            results = self._search_ddg_html(query)
+            if results:
+                self.last_results = results
+                return self._format_results(query, results)
+        except Exception as e:
+            errors.append(f"DDG HTML scrape error: {e}")
+        # Google fallback (best-effort)
         if GOOGLE_AVAILABLE:
             for attempt in range(self.retry_count):
                 try:
-                    result = self._search_google(query)
-                    if result and not result.startswith("Error"):
-                        self.last_results = result
-                        return result
+                    results = self._search_google(query)
+                    if results:
+                        self.last_results = results
+                        return self._format_results(query, results)
                 except Exception as e:
-                    print(f"Google search attempt {attempt + 1} failed: {str(e)}")
-                    if attempt < self.retry_count - 1:
-                        time.sleep(2)  # Wait before retrying
-        
-        # If all else fails, return an error
-        return f"Error: All search methods failed for query: {query}"
+                    errors.append(f"Google attempt {attempt+1} error: {e}")
+                    time.sleep(0.5)
+        # nothing worked
+        err_text = "\n".join(errors) if errors else "No methods available (no network or no packages installed)."
+        return f"Error: All search methods failed for query: {query}\nDetails:\n{err_text}"
     
-    def _search_duckduckgo(self, query: str) -> str:
-        """Search using DuckDuckGo."""
+    def _search_duckduckgo(self, query: str):
+        """Try DDGS() generator or ddg() function depending on availability."""
+        out = []
+        # prefer DDGS context manager if available
         try:
-            with DDGS() as ddgs:
-                # Use the correct API for the pinned version
-                results = list(ddgs.text(query, max_results=self.max_results))
-            
-            if not results:
-                return f"No search results found for: {query}"
-            
-            # Format the results
-            formatted_results = [f"Web Search Results for '{query}':\n"]
-            
-            for i, result in enumerate(results, 1):
-                # In version 3.8.5, results are dictionaries with 'title', 'body', and 'href'
-                title = result.get('title', 'No title')
-                snippet = result.get('body', 'No description available')
-                link = result.get('href', '#')
-                
-                # Truncate long snippets
-                if len(snippet) > 200:
-                    snippet = snippet[:200] + "..."
-                
-                formatted_results.append(f"{i}. {title}\n")
-                formatted_results.append(f"   {snippet}\n")
-                formatted_results.append(f"   URL: {link}\n\n")
-            
-            return "\n".join(formatted_results)
-            
+            if 'DDGS' in globals() and DDGS is not None:
+                with DDGS() as ddgs:
+                    gen = ddgs.text(query, max_results=self.max_results)
+                    for r in gen:
+                        title = r.get('title') or r.get('headline') or ''
+                        snippet = r.get('body') or r.get('snippet') or ''
+                        href = r.get('href') or r.get('url') or r.get('link') or ''
+                        out.append({'title': title.strip(), 'snippet': snippet.strip(), 'url': href})
+            else:
+                # try ddg() function (returns a list of dicts)
+                raw = ddg(query, max_results=self.max_results)
+                for r in raw:
+                    title = r.get('title') or r.get('headline') or ''
+                    snippet = r.get('body') or r.get('snippet') or ''
+                    href = r.get('href') or r.get('url') or r.get('link') or ''
+                    out.append({'title': title.strip(), 'snippet': snippet.strip(), 'url': href})
         except Exception as e:
-            return f"Error during DuckDuckGo search: {str(e)}"
+            # bubble up to allow retries / fallbacks
+            raise
+        # filter empty URLs and deduplicate
+        final = []
+        seen = set()
+        for item in out:
+            u = (item.get('url') or '').strip()
+            if not u or u in seen:
+                continue
+            seen.add(u)
+            final.append({
+                'title': item.get('title') or u,
+                'snippet': item.get('snippet') or '',
+                'url': u
+            })
+        return final
     
-    def _search_google(self, query: str) -> str:
-        """Search using Google as a fallback."""
+    def _search_ddg_html(self, query: str):
+        """Best-effort scraping of DuckDuckGo HTML results (no client lib needed)."""
+        headers = {'User-Agent': random.choice(self.user_agents)}
+        url = "https://html.duckduckgo.com/html/"
+        resp = requests.post(url, data={'q': query}, headers=headers, timeout=8)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        results = []
+        # Try a few strategies to find anchors that look like results
+        # 1) anchors with class result__a
+        anchors = soup.select("a.result__a")
+        if not anchors:
+            anchors = [a for a in soup.find_all("a", href=True) if a['href'].startswith("http") and a.get_text().strip()]
+        for a in anchors[: self.max_results]:
+            title = a.get_text().strip()
+            href = a['href']
+            snippet = ""
+            # try to find a sibling snippet
+            parent = a.find_parent()
+            if parent:
+                para = parent.find("a", class_="result__snippet") or parent.find("div", class_="result__snippet") or parent.find("p")
+                if para:
+                    snippet = para.get_text().strip()
+            results.append({'title': title, 'snippet': snippet, 'url': href})
+        # dedupe
+        seen = set()
+        final = []
+        for r in results:
+            if r['url'] not in seen:
+                seen.add(r['url'])
+                final.append(r)
+        return final
+    
+    def _search_google(self, query: str):
+        """Use googlesearch.search as fallback. The googlesearch API is fragile; handle multiple signatures."""
+        out = []
+        # try typical signatures
+        links = None
         try:
-            # Get random user agent
-            headers = {'User-Agent': random.choice(self.user_agents)}
-            
-            # Perform Google search - only get URLs
-            links = list(google_search(query, num_results=self.max_results, 
-                                     stop=self.max_results, pause=2.0, 
-                                     headers=headers))
-            
-            if not links:
-                return f"No search results found for: {query}"
-            
-            # Format the results
-            formatted_results = [f"Web Search Results for '{query}':\n"]
-            
-            for i, url in enumerate(links, 1):
-                title = "No title"
-                snippet = "No description available"
-                
-                # Try to fetch the page to get title and snippet
-                try:
-                    response = requests.get(url, headers=headers, timeout=5)
-                    response.raise_for_status()
-                    
-                    soup = BeautifulSoup(response.text, 'html.parser')
-                    
-                    # Get title
-                    if soup.title and soup.title.string:
-                        title = soup.title.string
-                    
-                    # Try to get a snippet from meta description or first paragraph
-                    meta_desc = soup.find('meta', attrs={'name': 'description'})
-                    if meta_desc and meta_desc.get('content'):
-                        snippet = meta_desc.get('content')
-                    else:
-                        first_p = soup.find('p')
-                        if first_p:
-                            snippet = first_p.get_text()
-                    
-                    # Truncate long snippets
-                    if len(snippet) > 200:
-                        snippet = snippet[:200] + "..."
-                        
-                except Exception as e:
-                    print(f"Error fetching page content for {url}: {str(e)}")
-                    # Keep default title and snippet
-                
-                formatted_results.append(f"{i}. {title}\n")
-                formatted_results.append(f"   {snippet}\n")
-                formatted_results.append(f"   URL: {url}\n\n")
-            
-            return "\n".join(formatted_results)
-            
-        except Exception as e:
-            return f"Error during Google search: {str(e)}"
+            # common signature: search(query, num=10, stop=None, pause=2.0)
+            links = list(google_search(query, num=self.max_results, stop=self.max_results, pause=2.0))
+        except TypeError:
+            try:
+                # another variant: search(query, num_results=10)
+                links = list(google_search(query, num_results=self.max_results))
+            except Exception:
+                # last resort: try with only query and pause
+                links = list(google_search(query, pause=2.0))
+        # if links is None or empty, return empty
+        if not links:
+            return []
+        # links may already be strings (urls)
+        for url in links[: self.max_results]:
+            title = "No title"
+            snippet = ""
+            try:
+                resp = requests.get(url, headers={'User-Agent': random.choice(self.user_agents)}, timeout=5)
+                resp.raise_for_status()
+                soup = BeautifulSoup(resp.text, "html.parser")
+                if soup.title and soup.title.string:
+                    title = soup.title.string.strip()
+                meta = soup.find("meta", attrs={"name": "description"}) or soup.find("meta", attrs={"property": "og:description"})
+                if meta and meta.get("content"):
+                    snippet = meta.get("content").strip()
+                else:
+                    p = soup.find("p")
+                    if p:
+                        snippet = p.get_text().strip()[:300]
+            except Exception:
+                # keep defaults
+                pass
+            out.append({'title': title, 'snippet': snippet, 'url': url})
+        return out
+    
+    def _format_results(self, query: str, results: list) -> str:
+        lines = [f"Web Search Results for '{query}':\n"]
+        for i, r in enumerate(results[: self.max_results], 1):
+            lines.append(f"{i}. {r.get('title', 'No title')}\n")
+            snippet = r.get('snippet') or ""
+            if len(snippet) > 300:
+                snippet = snippet[:300] + "..."
+            lines.append(f"   {snippet}\n")
+            lines.append(f"   URL: {r.get('url', '')}\n\n")
+        return "\n".join(lines)
     
     def get_system_prompt(self) -> str:
         """Return the system prompt for this tool."""
         return (
             f"You have access to {self.name}. {self.description} "
-            "When you need to search the web for current information, include your search query in your response. "
-            "For example: 'Let me search for the latest Python version' or 'I should look up information about quantum computing'. "
+            "When you need to search the web for current information, use the following XML format:\n"
+            "```xml\n"
+            "<tool>\n"
+            "  <name>web_search</name>\n"
+            "  <parameters>\n"
+            "    <query>your search query</query>\n"
+            "  </parameters>\n"
+            "</tool>\n"
+            "```\n\n"
+            "Only use this format when you actually want to execute the tool. "
+            "Do not include it in your thinking process or examples unless you want it to be executed. "
             "The search results will be automatically executed and provided back to you. "
             "Use this tool when you need up-to-date information or specific facts not in your training data. "
             "The tool will return a formatted list of search results with titles, snippets, and URLs. "
@@ -233,19 +317,8 @@ class Web_search:
             "Be specific with your search queries to get the most relevant results. "
             "Note: The tool has built-in rate limiting and will automatically retry if a search fails."
         )
-    
-    def test_search(self, query: str) -> dict:
-        """Test method to verify the search functionality works."""
-        print(f"Testing web search with query: {query}")
-        result = self.execute(query)
-        
-        return {
-            "query": query,
-            "result": result,
-            "last_results": self.last_results
-        }
 
-# Test the tool directly
+# simple local test runner when executed directly
 if __name__ == "__main__":
-    ws = Web_search()
-    print(ws.test_search("latest Python version"))
+    w = Web_search()
+    print(w.execute("latest Python version"))

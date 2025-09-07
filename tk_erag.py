@@ -525,27 +525,50 @@ class ChatGUI(tk.Tk):
         # Add system messages for enabled tools
         if len(self.history) == 1:  # First message
             system_messages = []
+            
+            # Create a summary of enabled tools
+            enabled_tools = []
             for tool_name, tool in self.tools.items():
                 if tool.enabled:
-                    system_messages.append(tool.get_system_prompt())
+                    enabled_tools.append(f"- {tool.name}: {tool.description}")
             
-            if system_messages:
-                # Add general guidelines for penetration testing if any tool is enabled
-                system_messages.append(
-                    "IMPORTANT GUIDELINES FOR PENETRATION TESTING:\n"
-                    "1. BE DIRECT AND EFFICIENT: Don't overthink. Issue one command at a time, analyze the result, then decide the next step.\n"
-                    "2. NO LIMIT ON COMMANDS: You can issue as many commands as needed for a thorough investigation.\n"
-                    "3. CHECK DOMAIN EXISTENCE FIRST: Before issuing commands for a domain or subdomain, first verify it exists with a simple check.\n"
-                    "4. FOCUS ON VULNERABILITIES: Prioritize identifying security vulnerabilities and potential attack vectors.\n"
-                    "5. AVOID LARGE FILES: Do not fetch large files like JavaScript libraries, CSS files, or large images unless specifically needed for vulnerability analysis.\n"
-                    "6. END WHEN APPROPRIATE: When you have completed your investigation and found no vulnerabilities or no further paths to investigate, "
-                    "explicitly end the conversation by including 'END_CONVERSATION' in your response.\n"
-                    "7. BE THOROUGH: Investigate methodically, but focus on efficient use of commands."
-                )
-                
-                # Insert system messages at the beginning of history
-                for msg in reversed(system_messages):
-                    self.history.insert(0, {"role": "system", "content": msg})
+            # In the send_message method, update the system message for tools:
+            if enabled_tools:
+                # Add tool summary as the first system message
+                tool_summary = {
+                    "role": "system",
+                    "content": "You have access to the following tools:\n" + "\n".join(enabled_tools) + 
+                            "\n\nTo use a tool, include an XML command in your response using this format:\n"
+                            "```xml\n"
+                            "<tool>\n"
+                            "  <name>tool_name</name>\n"
+                            "  <parameters>\n"
+                            "    <parameter_name>value</parameter_name>\n"
+                            "  </parameters>\n"
+                            "</tool>\n"
+                            "```\n\n"
+                            "Only include this format when you actually want to execute the tool. "
+                            "Do not include it in your thinking process or examples unless you want it to be executed."
+                }
+                self.history.insert(0, tool_summary)
+
+           
+            # Add penetration testing guidelines if relevant tools are enabled
+            pentest_tools = [tool for tool in self.tools.values() if tool.enabled and tool.name in ["Curl"]]
+            if pentest_tools:
+                general_guidelines = {
+                    "role": "system",
+                    "content": (
+                        "GENERAL TOOL USAGE GUIDELINES:\n"
+                        "1. Use tools when you need up-to-date information, specific data, or to perform actions beyond your knowledge.\n"
+                        "2. When using a tool, use the XML format specified in the tool description.\n"
+                        "3. After receiving tool results, analyze them and provide a comprehensive response.\n"
+                        "4. If a tool fails, try an alternative approach or explain the limitation.\n"
+                        "5. For web searches, be specific with your query to get the most relevant results.\n"
+                        "6. For curl commands, keep them simple and use common APIs or websites."
+                    )
+                }
+                self.history.insert(3, general_guidelines)
         
         # Start background thread for API call
         threading.Thread(target=self._call_api, daemon=True).start()
@@ -620,11 +643,12 @@ class ChatGUI(tk.Tk):
                 self.is_sending = False
                 self.send_button.config(state="normal", text="Send")
     
+    # In tk_erag.py, in the _execute_tool_for_ai method
     def _execute_tool_for_ai(self, tool, command: str, ai_response: str):
         """Execute a tool command requested by the AI and feed results back."""
-        self._print_message(f"\n[Executing {tool.name} command: {command}]\n", "system")
+        self._print_message(f"\n[Executing {tool.name} with command: {command}]\n", "system")
         
-        # Execute the tool command
+        # Execute the tool
         tool_output = tool.execute(command)
         
         # Truncate output if it's too large (over 2000 characters)
@@ -638,7 +662,7 @@ class ChatGUI(tk.Tk):
         self.history.append({"role": "assistant", "content": ai_response})
         
         # Add tool results as a follow-up message and get AI to process it
-        tool_result_msg = f"The {tool.name} command returned:\n{tool_output}"
+        tool_result_msg = f"The {tool.name} tool was executed with the following result:\n{tool_output}"
         self.history.append({"role": "user", "content": tool_result_msg})
         
         # Ask AI to process the tool results
