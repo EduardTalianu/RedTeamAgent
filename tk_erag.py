@@ -165,6 +165,8 @@ class ChatGUI(tk.Tk):
         self.history = []  # Chat history for the API
         self.curl_enabled = False
         self.is_sending = False
+        self.conversation_ended = False  # Track if conversation has been ended
+        self.checked_domains = set()  # Track domains that have been checked
         
         # Build the interface
         self._build_widgets()
@@ -371,6 +373,8 @@ class ChatGUI(tk.Tk):
             self.chat_display.delete("1.0", "end")
             self.chat_display.configure(state="disabled")
             self.history.clear()
+            self.conversation_ended = False
+            self.checked_domains.clear()
             self._print_message("Chat cleared. Starting fresh!\n", "system")
     
     def save_chat(self):
@@ -409,9 +413,32 @@ class ChatGUI(tk.Tk):
         
         return None
     
+    def detect_end_conversation(self, text: str):
+        """Detect if the AI is requesting to end the conversation."""
+        # Look for the end conversation command
+        end_patterns = [
+            r'END_CONVERSATION',
+            r'END\ CONVERSATION',
+            r'CONVERSATION\ ENDED',
+            r'NO\ FURTHER\ INVESTIGATION\ NEEDED',
+            r'NO\ VULNERABILITIES\ FOUND'
+        ]
+        
+        for pattern in end_patterns:
+            if re.search(pattern, text, re.IGNORECASE):
+                return True
+        return False
+    
+    def extract_domain_from_url(self, url: str) -> str:
+        """Extract the domain from a URL."""
+        # Remove protocol and path
+        domain = re.sub(r'^https?://', '', url)
+        domain = domain.split('/')[0]
+        return domain
+    
     def send_message(self):
         """Send a message to the AI."""
-        if self.is_sending:
+        if self.is_sending or self.conversation_ended:
             return
         
         if not self.model_var.get():
@@ -441,7 +468,16 @@ class ChatGUI(tk.Tk):
                 "For example: 'curl https://api.example.com/data' or 'curl -H \"Accept: application/json\" https://api.example.com'. "
                 "The curl output will be automatically executed and provided back to you. "
                 "Keep curl commands simple and use common APIs or websites. "
-                "For HTML pages, you'll receive a truncated version focusing on the title and beginning of the content."
+                "For HTML pages, you'll receive a truncated version focusing on the title and beginning of the content.\n\n"
+                "IMPORTANT GUIDELINES FOR PENETRATION TESTING:\n"
+                "1. BE DIRECT AND EFFICIENT: Don't overthink. Issue one curl command at a time, analyze the result, then decide the next step.\n"
+                "2. NO LIMIT ON COMMANDS: You can issue as many curl commands as needed for a thorough investigation.\n"
+                "3. CHECK DOMAIN EXISTENCE FIRST: Before issuing commands for a domain or subdomain, first verify it exists with a simple check.\n"
+                "4. FOCUS ON VULNERABILITIES: Prioritize identifying security vulnerabilities and potential attack vectors.\n"
+                "5. AVOID LARGE FILES: Do not fetch large files like JavaScript libraries, CSS files, or large images unless specifically needed for vulnerability analysis.\n"
+                "6. END WHEN APPROPRIATE: When you have completed your investigation and found no vulnerabilities or no further paths to investigate, "
+                "explicitly end the conversation by including 'END_CONVERSATION' in your response.\n"
+                "7. BE THOROUGH: Investigate methodically, but focus on efficient use of curl commands."
             )
             self.history.insert(0, {"role": "system", "content": system_msg})
         
@@ -485,15 +521,61 @@ class ChatGUI(tk.Tk):
             # Join the full response
             ai_response = "".join(full_response)
             
+            # Check if AI wants to end the conversation
+            if self.detect_end_conversation(ai_response):
+                self._print_message("\n[Conversation ended by AI - no further investigation needed]\n", "system")
+                self.conversation_ended = True
+                self.history.append({"role": "assistant", "content": ai_response})
             # Check if AI wants to execute curl (if curl is enabled)
-            if self.curl_enabled:
+            elif self.curl_enabled:
                 curl_cmd = self.detect_curl_request(ai_response)
                 if curl_cmd:
-                    self._execute_curl_for_ai(curl_cmd, ai_response)
+                    # Extract domain from the curl command
+                    domain_match = re.search(r'https?://([^/\s]+)', curl_cmd)
+                    if domain_match:
+                        domain = domain_match.group(1)
+                        # Check if the domain has been verified to exist
+                        if domain not in self.checked_domains:
+                            # First check if the domain exists
+                            self._print_message(f"\n[Checking if domain {domain} exists before proceeding...]\n", "system")
+                            check_cmd = f"curl -k -I https://{domain}"
+                            check_output = local_curl(check_cmd)
+                            
+                            if "Could not resolve host" in check_output or "Connection refused" in check_output:
+                                self._print_message(f"\n[Domain {domain} does not exist or is not accessible. Skipping command.]\n", "system")
+                                self.history.append({"role": "assistant", "content": ai_response})
+                            else:
+                                self._print_message(f"\n[Domain {domain} exists. Proceeding with command execution.]\n", "system")
+                                self.checked_domains.add(domain)
+                                
+                                # Check if the command is trying to fetch a large file
+                                if any(extension in curl_cmd.lower() for extension in ['.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.pdf']):
+                                    self._print_message(
+                                        f"\n[Skipping curl command to avoid fetching large file: {curl_cmd}]\n", 
+                                        "system"
+                                    )
+                                    self.history.append({"role": "assistant", "content": ai_response})
+                                else:
+                                    self._execute_curl_for_ai(curl_cmd, ai_response)
+                        else:
+                            # Domain already checked, proceed with command
+                            # Check if the command is trying to fetch a large file
+                            if any(extension in curl_cmd.lower() for extension in ['.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.pdf']):
+                                self._print_message(
+                                    f"\n[Skipping curl command to avoid fetching large file: {curl_cmd}]\n", 
+                                    "system"
+                                )
+                                self.history.append({"role": "assistant", "content": ai_response})
+                            else:
+                                self._execute_curl_for_ai(curl_cmd, ai_response)
+                    else:
+                        # No domain found in the command, execute it directly
+                        self._execute_curl_for_ai(curl_cmd, ai_response)
                 else:
                     # Just add the response to history
                     self.history.append({"role": "assistant", "content": ai_response})
             else:
+                # Just add the response to history
                 self.history.append({"role": "assistant", "content": ai_response})
             
         except requests.exceptions.Timeout:
@@ -503,9 +585,10 @@ class ChatGUI(tk.Tk):
         except Exception as e:
             self._print_message(f"\n[Unexpected error: {str(e)}]\n", "error")
         finally:
-            # Re-enable send button
-            self.is_sending = False
-            self.send_button.config(state="normal", text="Send")
+            # Re-enable send button if conversation hasn't ended
+            if not self.conversation_ended:
+                self.is_sending = False
+                self.send_button.config(state="normal", text="Send")
     
     def _execute_curl_for_ai(self, curl_cmd: str, ai_response: str):
         """Execute a curl command requested by the AI and feed results back."""
@@ -514,9 +597,12 @@ class ChatGUI(tk.Tk):
         # Execute the curl command (will have -k added automatically)
         curl_output = local_curl(curl_cmd)
         
-        # Display the curl output (truncated if too long)
-        display_output = curl_output[:500] + "..." if len(curl_output) > 500 else curl_output
-        self._print_message(f"[Curl output: {display_output}]\n", "system")
+        # Truncate output if it's too large (over 2000 characters)
+        if len(curl_output) > 2000:
+            curl_output = curl_output[:2000] + "\n\n[Output truncated due to size limitations]"
+        
+        # Display the curl output
+        self._print_message(f"[Curl output: {curl_output}]\n", "system")
         
         # Add the AI's response to history
         self.history.append({"role": "assistant", "content": ai_response})

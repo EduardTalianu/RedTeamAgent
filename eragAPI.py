@@ -68,7 +68,9 @@ class GeminiClient(BaseClient):
         self.model = genai.GenerativeModel(model)
 
     def chat(self, messages, temperature=0.7, max_tokens=None, stream=False):
-        formatted = [{"role": m["role"], "parts": [{"text": m["content"]}]} for m in messages]
+        # Convert "assistant" role to "model" which Gemini expects
+        formatted = [{"role": "model" if m["role"] == "assistant" else "user", 
+                     "parts": [{"text": m["content"]}]} for m in messages]
         response = self.model.generate_content(
             formatted,
             generation_config=genai.types.GenerationConfig(
@@ -92,30 +94,60 @@ class GeminiClient(BaseClient):
 
 class CohereClient(BaseClient):
     def __init__(self, model="command"):
-        self.client = cohere.Client(api_key=os.getenv("CO_API_KEY"))
+        # Use ClientV2 instead of Client for v2 API
+        self.client = cohere.ClientV2(api_key=os.getenv("CO_API_KEY"))
         self.model = model
 
     def chat(self, messages, temperature=0.7, max_tokens=None, stream=False):
-        history = [{"role": "USER" if m["role"] == "user" else "CHATBOT", 
-                   "message": m["content"]} for m in messages]
-        return self.client.chat(
-            message=history[-1]["message"],
-            model=self.model,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            stream=stream,
-            chat_history=history[:-1]
-        )
+        # Convert messages to v2 format
+        formatted_messages = []
+        for msg in messages:
+            # Convert roles: "user" -> "user", "assistant" -> "assistant"
+            formatted_messages.append({
+                "role": msg["role"],
+                "content": msg["content"]
+            })
+        
+        if stream:
+            # Use chat_stream for streaming
+            stream = self.client.chat_stream(
+                model=self.model,
+                messages=formatted_messages,
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+            return stream
+        else:
+            # Use chat for non-streaming
+            response = self.client.chat(
+                model=self.model,
+                messages=formatted_messages,
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+            # Access response text via message.content[0].text in v2
+            return response.message.content[0].text
 
     def complete(self, prompt, temperature=0.7, max_tokens=None, stream=False):
-        return self.client.generate(
-            prompt=prompt,
-            model=self.model,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            stream=stream
-        )
-
+        # Convert prompt to message format
+        messages = [{"role": "user", "content": prompt}]
+        
+        if stream:
+            return self.client.chat_stream(
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+        else:
+            response = self.client.chat(
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+            return response.message.content[0].text
+        
 class DeepSeekClient(BaseClient):
     def __init__(self, model="deepseek-chat"):
         self.client = OpenAI(
@@ -326,13 +358,15 @@ async def chat_endpoint(request: ChatRequest):
                                         formatted = f"data: {json.dumps({'choices': [{'delta': {'content': part.text}, 'index': 0}]})}\n\n"
                                         yield formatted
                     elif provider == "cohere":
-                        # Cohere has its own streaming format
+                        # Updated Cohere v2 streaming format handling
                         for chunk in stream:
-                            if hasattr(chunk, 'event_type'):
-                                if chunk.event_type == 'text-generation' and hasattr(chunk, 'text'):
-                                    formatted = f"data: {json.dumps({'choices': [{'delta': {'content': chunk.text}, 'index': 0}]})}\n\n"
+                            if chunk and hasattr(chunk, 'type'):
+                                if chunk.type == 'content-delta':
+                                    # Extract text from v2 streaming format
+                                    content = chunk.delta.message.content.text
+                                    formatted = f"data: {json.dumps({'choices': [{'delta': {'content': content}, 'index': 0}]})}\n\n"
                                     yield formatted
-                                elif chunk.event_type == 'stream-end':
+                                elif chunk.type == 'stream-end':
                                     break
                     else:
                         # OpenAI-compatible format (Groq, DeepSeek, Ollama)
@@ -499,10 +533,11 @@ def get_available_models(api_type):
             if not os.getenv("CO_API_KEY"):
                 print("CO_API_KEY not found in environment")
                 return []
-            # Synchronous version for Cohere
-            client = cohere.Client(api_key=os.getenv("CO_API_KEY"))
-            response = client.models.list()
-            return [model.name for model in response.models if 'chat' in model.endpoints]
+            # Use ClientV2 for model listing
+            client = cohere.ClientV2(api_key=os.getenv("CO_API_KEY"))
+            # For v2, we'll return a list of known models
+            # You can customize this list based on your needs
+            return ["command", "command-nightly", "command-light", "command-light-nightly"]
         
         elif api_type == "deepseek":
             if not os.getenv("DEEPSEEK_API_KEY"):
