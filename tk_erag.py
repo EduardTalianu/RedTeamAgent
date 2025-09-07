@@ -6,6 +6,7 @@ Handles streaming responses and provides local curl execution capability.
 import datetime
 import json
 import subprocess
+import sys
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, scrolledtext
@@ -38,6 +39,15 @@ def local_curl(cmd_line: str) -> str:
         # Ensure the command starts with curl
         if not cmd_line.strip().startswith("curl"):
             cmd_line = "curl " + cmd_line
+        
+        # Add -k option if not present
+        if "-k" not in cmd_line and "--insecure" not in cmd_line:
+            # Insert -k after curl and before other options
+            parts = cmd_line.split(maxsplit=1)
+            if len(parts) == 1:
+                cmd_line = "curl -k"
+            else:
+                cmd_line = "curl -k " + parts[1]
         
         print(f"Executing: {cmd_line}")
         
@@ -162,7 +172,8 @@ class ChatGUI(tk.Tk):
         # Welcome message
         self._print_message(
             "Welcome! Select a model and start chatting.\n"
-            "Click 'Enable Curl' to allow the AI to execute local curl commands.\n",
+            "Click 'Enable Curl' to allow the AI to execute local curl commands.\n"
+            "Note: All curl commands will be executed with -k (insecure) option.\n",
             "system"
         )
     
@@ -342,7 +353,8 @@ class ChatGUI(tk.Tk):
         if self.curl_enabled:
             self.curl_button.config(text="Disable Curl")
             self._print_message(
-                "[Curl tool ENABLED - AI can now execute local curl commands]\n", 
+                "[Curl tool ENABLED - AI can now execute local curl commands]\n"
+                "Note: All curl commands will be executed with -k (insecure) option.\n", 
                 "system"
             )
         else:
@@ -379,16 +391,22 @@ class ChatGUI(tk.Tk):
     def detect_curl_request(self, text: str):
         """Detect if the AI is requesting to execute a curl command."""
         # Look for curl commands in the AI's response
-        curl_patterns = [
-            r'curl\s+["\']?https?://[^\s"\']+',  # curl http://...
-            r'curl\s+-[A-Za-z]\s+',  # curl with flags
-            r'`curl\s+[^`]+`',  # curl in backticks
-        ]
         
-        for pattern in curl_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                return match.group(0).strip('`')
+        # Pattern 1: Look for curl commands in code blocks
+        code_block_pattern = r'```(?:bash)?\s*\n?(curl[^\n`]+)\n?```'
+        match = re.search(code_block_pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        
+        # Pattern 2: Look for inline curl commands
+        inline_pattern = r'(curl\s+[^\s`]+(?:\s+[^\s`]+)*)'
+        match = re.search(inline_pattern, text, re.IGNORECASE)
+        if match:
+            cmd = match.group(1).strip()
+            # Remove trailing punctuation
+            cmd = cmd.rstrip('.,;:')
+            return cmd
+        
         return None
     
     def send_message(self):
@@ -418,9 +436,12 @@ class ChatGUI(tk.Tk):
         # If curl is enabled, add a system message to inform the AI
         if self.curl_enabled and len(self.history) == 1:  # First message
             system_msg = (
-                "You can execute curl commands to fetch data from URLs. "
-                "When you need to fetch information from a URL, simply include "
-                "a curl command in your response and it will be executed automatically."
+                "You have access to execute curl commands to fetch data from the web. "
+                "When you need to fetch information from a URL, include a curl command in your response. "
+                "For example: 'curl https://api.example.com/data' or 'curl -H \"Accept: application/json\" https://api.example.com'. "
+                "The curl output will be automatically executed and provided back to you. "
+                "Keep curl commands simple and use common APIs or websites. "
+                "For HTML pages, you'll receive a truncated version focusing on the title and beginning of the content."
             )
             self.history.insert(0, {"role": "system", "content": system_msg})
         
@@ -490,7 +511,7 @@ class ChatGUI(tk.Tk):
         """Execute a curl command requested by the AI and feed results back."""
         self._print_message(f"\n[Executing curl command: {curl_cmd}]\n", "system")
         
-        # Execute the curl command
+        # Execute the curl command (will have -k added automatically)
         curl_output = local_curl(curl_cmd)
         
         # Display the curl output (truncated if too long)
