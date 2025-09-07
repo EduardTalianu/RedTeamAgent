@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
 Tkinter chat client for EragAPI — works with the server.
-Handles streaming responses and provides local curl execution capability.
+Handles streaming responses and provides plugin support for tools.
 """
 import datetime
+import importlib.util
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -14,7 +16,7 @@ import requests
 import re
 
 DEFAULT_SERVER = "http://127.0.0.1:11436"
-
+TOOLS_DIR = "tools"
 
 # ---------- helpers ----------
 def get_models(server: str) -> dict:
@@ -31,44 +33,6 @@ def get_models(server: str) -> dict:
             "gemini": ["gemini-pro"],
             "ollama": ["llama2"]
         }
-
-
-def local_curl(cmd_line: str) -> str:
-    """Run curl command locally and return the output."""
-    try:
-        # Ensure the command starts with curl
-        if not cmd_line.strip().startswith("curl"):
-            cmd_line = "curl " + cmd_line
-        
-        # Add -k option if not present
-        if "-k" not in cmd_line and "--insecure" not in cmd_line:
-            # Insert -k after curl and before other options
-            parts = cmd_line.split(maxsplit=1)
-            if len(parts) == 1:
-                cmd_line = "curl -k"
-            else:
-                cmd_line = "curl -k " + parts[1]
-        
-        print(f"Executing: {cmd_line}")
-        
-        result = subprocess.run(
-            cmd_line, 
-            shell=True, 
-            text=True, 
-            capture_output=True, 
-            timeout=30
-        )
-        
-        output = result.stdout if result.stdout else result.stderr
-        if not output:
-            output = f"Command executed with return code: {result.returncode}"
-        
-        return output
-    except subprocess.TimeoutExpired:
-        return "[curl error] Command timed out after 30 seconds"
-    except Exception as e:
-        return f"[curl error] {str(e)}"
-
 
 def parse_sse_response(response):
     """
@@ -151,6 +115,54 @@ def parse_sse_response(response):
                 except:
                     pass
 
+# ---------- Tool Loading System ----------
+class ToolLoader:
+    """Dynamically loads tools from the tools directory."""
+    
+    @staticmethod
+    def load_tools():
+        """Load all available tools from the tools directory."""
+        tools = {}
+        
+        # Get the directory where the script is located
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        tools_path = os.path.join(script_dir, TOOLS_DIR)
+        
+        # Ensure tools directory exists
+        if not os.path.exists(tools_path):
+            print(f"Creating tools directory at: {tools_path}")
+            os.makedirs(tools_path)
+            return tools
+        
+        print(f"Looking for tools in: {tools_path}")
+        
+        # Load all Python files in tools directory (except __init__.py)
+        for filename in os.listdir(tools_path):
+            if filename.endswith('.py') and filename != '__init__.py':
+                tool_name = filename[:-3]  # Remove .py extension
+                try:
+                    # Import the module
+                    module_path = os.path.join(tools_path, filename)
+                    print(f"Loading tool from: {module_path}")
+                    
+                    spec = importlib.util.spec_from_file_location(tool_name, module_path)
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    
+                    # Get the tool class (assumed to be the same name as the file)
+                    class_name = tool_name.capitalize()
+                    if hasattr(module, class_name):
+                        tool_class = getattr(module, class_name)
+                        tool_instance = tool_class()
+                        tools[tool_name] = tool_instance
+                        print(f"Successfully loaded tool: {tool_name} ({class_name})")
+                    else:
+                        print(f"Error: Class {class_name} not found in {filename}")
+                except Exception as e:
+                    print(f"Error loading tool {tool_name}: {e}")
+        
+        print(f"Total tools loaded: {len(tools)}")
+        return tools
 
 # ---------- GUI ----------
 class ChatGUI(tk.Tk):
@@ -163,21 +175,27 @@ class ChatGUI(tk.Tk):
         self.server = DEFAULT_SERVER
         self.models = get_models(self.server)
         self.history = []  # Chat history for the API
-        self.curl_enabled = False
         self.is_sending = False
         self.conversation_ended = False  # Track if conversation has been ended
         self.checked_domains = set()  # Track domains that have been checked
+        self.server_process = None  # Track the server process
+        
+        # Load tools
+        print("Loading tools...")
+        self.tools = ToolLoader.load_tools()
+        print(f"Available tools: {list(self.tools.keys())}")
+        self.tool_buttons = {}  # Store tool buttons for state management
         
         # Build the interface
         self._build_widgets()
         
         # Welcome message
-        self._print_message(
-            "Welcome! Select a model and start chatting.\n"
-            "Click 'Enable Curl' to allow the AI to execute local curl commands.\n"
-            "Note: All curl commands will be executed with -k (insecure) option.\n",
-            "system"
-        )
+        welcome_msg = "Welcome! Select a model and start chatting.\n"
+        if self.tools:
+            welcome_msg += "Available tools: " + ", ".join([tool.name for tool in self.tools.values()]) + "\n"
+            welcome_msg += "Enable tools to allow the AI to use them.\n"
+        welcome_msg += "Click 'Start Server' to launch the EragAPI server.\n"
+        self._print_message(welcome_msg, "system")
     
     def _build_widgets(self):
         """Build the GUI widgets."""
@@ -242,6 +260,55 @@ class ChatGUI(tk.Tk):
             width=8
         ).pack(side="left")
         
+        # === Tools Frame (New row for tools) ===
+        tools_frame = ttk.Frame(self, padding="5")
+        tools_frame.pack(side="top", fill="x")
+        
+        # Tools label
+        ttk.Label(tools_frame, text="Tools:", font=("TkDefaultFont", 10, "bold")).pack(side="left", padx=(0, 10))
+        
+        # Tool buttons container
+        tools_container = ttk.Frame(tools_frame)
+        tools_container.pack(side="left", fill="x", expand=True)
+        
+        # Add tool buttons
+        print(f"Creating buttons for {len(self.tools)} tools")
+        for tool_name, tool in self.tools.items():
+            print(f"Creating button for tool: {tool_name} ({tool.name})")
+            btn = ttk.Button(
+                tools_container,
+                text=f"Enable {tool.name}",
+                command=lambda t=tool: self.toggle_tool(t)
+            )
+            btn.pack(side="left", padx=2)
+            self.tool_buttons[tool_name] = btn
+        
+        # User action buttons container
+        actions_container = ttk.Frame(tools_frame)
+        actions_container.pack(side="right")
+        
+        # Start server button
+        self.start_server_button = ttk.Button(
+            actions_container,
+            text="Start Server",
+            command=self.start_server
+        )
+        self.start_server_button.pack(side="right", padx=2)
+        
+        # Clear chat button
+        ttk.Button(
+            actions_container,
+            text="Clear Chat",
+            command=self.clear_chat
+        ).pack(side="right", padx=2)
+        
+        # Save chat button
+        ttk.Button(
+            actions_container,
+            text="Save Chat",
+            command=self.save_chat
+        ).pack(side="right", padx=2)
+        
         # === Chat Display Area ===
         chat_frame = ttk.Frame(self)
         chat_frame.pack(fill="both", expand=True, padx=5, pady=5)
@@ -262,6 +329,7 @@ class ChatGUI(tk.Tk):
         self.chat_display.tag_config("assistant", foreground="#008800")
         self.chat_display.tag_config("system", foreground="#666666", font=("Consolas", 9, "italic"))
         self.chat_display.tag_config("error", foreground="#cc0000")
+        self.chat_display.tag_config("server", foreground="#0066cc", font=("Consolas", 9, "bold"))
         
         # === Input Area ===
         input_frame = ttk.Frame(self)
@@ -280,47 +348,24 @@ class ChatGUI(tk.Tk):
         self.input_text.bind("<Return>", self._on_enter_key)
         self.input_text.bind("<Shift-Return>", lambda e: None)
         
-        # Buttons frame
-        buttons_frame = ttk.Frame(input_frame)
-        buttons_frame.pack(side="right", padx=(5, 0))
-        
         # Send button
         self.send_button = ttk.Button(
-            buttons_frame,
+            input_frame,
             text="Send",
             command=self.send_message,
-            state="normal"
+            state="normal",
+            width=10
         )
-        self.send_button.pack(fill="x", pady=(0, 3))
-        
-        # Curl tool button
-        self.curl_button = ttk.Button(
-            buttons_frame,
-            text="Enable Curl",
-            command=self.toggle_curl_tool
-        )
-        self.curl_button.pack(fill="x", pady=(0, 3))
-        
-        # Clear chat button
-        ttk.Button(
-            buttons_frame,
-            text="Clear Chat",
-            command=self.clear_chat
-        ).pack(fill="x", pady=(0, 3))
-        
-        # Save chat button
-        ttk.Button(
-            buttons_frame,
-            text="Save Chat",
-            command=self.save_chat
-        ).pack(fill="x")
+        self.send_button.pack(side="right", padx=(5, 0))
     
     def _populate_models(self):
         """Populate the model dropdown with available models."""
         model_list = []
         for provider, models in self.models.items():
             for model in models:
-                model_list.append(f"{provider}-{model}")
+                # Filter out models that don't support chat completions
+                if "whisper" not in model.lower():
+                    model_list.append(f"{provider}-{model}")
         
         if not model_list:
             model_list = ["groq-mixtral-8x7b-32768"]
@@ -349,22 +394,67 @@ class ChatGUI(tk.Tk):
         self.send_message()
         return "break"
     
-    def toggle_curl_tool(self):
-        """Toggle the curl tool on/off."""
-        self.curl_enabled = not self.curl_enabled
-        if self.curl_enabled:
-            self.curl_button.config(text="Disable Curl")
-            self._print_message(
-                "[Curl tool ENABLED - AI can now execute local curl commands]\n"
-                "Note: All curl commands will be executed with -k (insecure) option.\n", 
-                "system"
+    def start_server(self):
+        """Start the EragAPI server."""
+        if self.server_process and self.server_process.poll() is None:
+            self._print_message("[Server is already running]\n", "server")
+            return
+        
+        # Get the path to eragAPI.py (same directory as this script)
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        server_script = os.path.join(script_dir, "eragAPI.py")
+        
+        if not os.path.exists(server_script):
+            self._print_message(f"[Error: eragAPI.py not found at {server_script}]\n", "error")
+            return
+        
+        # Command to start the server
+        command = [sys.executable, server_script, "serve"]
+        
+        self._print_message(f"[Starting server with command: {' '.join(command)}]\n", "server")
+        
+        try:
+            # Start the server process
+            self.server_process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
             )
+            
+            # Start a thread to read and display server output
+            def read_server_output():
+                for line in self.server_process.stdout:
+                    self._print_message(f"[SERVER] {line.strip()}\n", "server")
+                
+                # When the process ends
+                self._print_message("[Server process ended]\n", "server")
+                self.server_process = None
+            
+            threading.Thread(target=read_server_output, daemon=True).start()
+            
+            # Update button text
+            self.start_server_button.config(text="Server Running")
+            
+            # Try to refresh models after a short delay
+            self.after(2000, self._refresh_models)
+            
+        except Exception as e:
+            self._print_message(f"[Error starting server: {str(e)}]\n", "error")
+    
+    def toggle_tool(self, tool):
+        """Toggle a tool on/off."""
+        tool.enabled = not tool.enabled
+        button = self.tool_buttons[tool.__class__.__name__.lower()]
+        
+        if tool.enabled:
+            button.config(text=f"Disable {tool.name}")
+            self._print_message(f"[{tool.name} ENABLED]\n", "system")
         else:
-            self.curl_button.config(text="Enable Curl")
-            self._print_message(
-                "[Curl tool DISABLED]\n", 
-                "system"
-            )
+            button.config(text=f"Enable {tool.name}")
+            self._print_message(f"[{tool.name} DISABLED]\n", "system")
     
     def clear_chat(self):
         """Clear the chat display and history."""
@@ -392,27 +482,6 @@ class ChatGUI(tk.Tk):
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to save chat:\n{str(e)}")
     
-    def detect_curl_request(self, text: str):
-        """Detect if the AI is requesting to execute a curl command."""
-        # Look for curl commands in the AI's response
-        
-        # Pattern 1: Look for curl commands in code blocks
-        code_block_pattern = r'```(?:bash)?\s*\n?(curl[^\n`]+)\n?```'
-        match = re.search(code_block_pattern, text, re.IGNORECASE)
-        if match:
-            return match.group(1).strip()
-        
-        # Pattern 2: Look for inline curl commands
-        inline_pattern = r'(curl\s+[^\s`]+(?:\s+[^\s`]+)*)'
-        match = re.search(inline_pattern, text, re.IGNORECASE)
-        if match:
-            cmd = match.group(1).strip()
-            # Remove trailing punctuation
-            cmd = cmd.rstrip('.,;:')
-            return cmd
-        
-        return None
-    
     def detect_end_conversation(self, text: str):
         """Detect if the AI is requesting to end the conversation."""
         # Look for the end conversation command
@@ -428,13 +497,6 @@ class ChatGUI(tk.Tk):
             if re.search(pattern, text, re.IGNORECASE):
                 return True
         return False
-    
-    def extract_domain_from_url(self, url: str) -> str:
-        """Extract the domain from a URL."""
-        # Remove protocol and path
-        domain = re.sub(r'^https?://', '', url)
-        domain = domain.split('/')[0]
-        return domain
     
     def send_message(self):
         """Send a message to the AI."""
@@ -460,26 +522,30 @@ class ChatGUI(tk.Tk):
         # Add to history
         self.history.append({"role": "user", "content": user_message})
         
-        # If curl is enabled, add a system message to inform the AI
-        if self.curl_enabled and len(self.history) == 1:  # First message
-            system_msg = (
-                "You have access to execute curl commands to fetch data from the web. "
-                "When you need to fetch information from a URL, include a curl command in your response. "
-                "For example: 'curl https://api.example.com/data' or 'curl -H \"Accept: application/json\" https://api.example.com'. "
-                "The curl output will be automatically executed and provided back to you. "
-                "Keep curl commands simple and use common APIs or websites. "
-                "For HTML pages, you'll receive a truncated version focusing on the title and beginning of the content.\n\n"
-                "IMPORTANT GUIDELINES FOR PENETRATION TESTING:\n"
-                "1. BE DIRECT AND EFFICIENT: Don't overthink. Issue one curl command at a time, analyze the result, then decide the next step.\n"
-                "2. NO LIMIT ON COMMANDS: You can issue as many curl commands as needed for a thorough investigation.\n"
-                "3. CHECK DOMAIN EXISTENCE FIRST: Before issuing commands for a domain or subdomain, first verify it exists with a simple check.\n"
-                "4. FOCUS ON VULNERABILITIES: Prioritize identifying security vulnerabilities and potential attack vectors.\n"
-                "5. AVOID LARGE FILES: Do not fetch large files like JavaScript libraries, CSS files, or large images unless specifically needed for vulnerability analysis.\n"
-                "6. END WHEN APPROPRIATE: When you have completed your investigation and found no vulnerabilities or no further paths to investigate, "
-                "explicitly end the conversation by including 'END_CONVERSATION' in your response.\n"
-                "7. BE THOROUGH: Investigate methodically, but focus on efficient use of curl commands."
-            )
-            self.history.insert(0, {"role": "system", "content": system_msg})
+        # Add system messages for enabled tools
+        if len(self.history) == 1:  # First message
+            system_messages = []
+            for tool_name, tool in self.tools.items():
+                if tool.enabled:
+                    system_messages.append(tool.get_system_prompt())
+            
+            if system_messages:
+                # Add general guidelines for penetration testing if any tool is enabled
+                system_messages.append(
+                    "IMPORTANT GUIDELINES FOR PENETRATION TESTING:\n"
+                    "1. BE DIRECT AND EFFICIENT: Don't overthink. Issue one command at a time, analyze the result, then decide the next step.\n"
+                    "2. NO LIMIT ON COMMANDS: You can issue as many commands as needed for a thorough investigation.\n"
+                    "3. CHECK DOMAIN EXISTENCE FIRST: Before issuing commands for a domain or subdomain, first verify it exists with a simple check.\n"
+                    "4. FOCUS ON VULNERABILITIES: Prioritize identifying security vulnerabilities and potential attack vectors.\n"
+                    "5. AVOID LARGE FILES: Do not fetch large files like JavaScript libraries, CSS files, or large images unless specifically needed for vulnerability analysis.\n"
+                    "6. END WHEN APPROPRIATE: When you have completed your investigation and found no vulnerabilities or no further paths to investigate, "
+                    "explicitly end the conversation by including 'END_CONVERSATION' in your response.\n"
+                    "7. BE THOROUGH: Investigate methodically, but focus on efficient use of commands."
+                )
+                
+                # Insert system messages at the beginning of history
+                for msg in reversed(system_messages):
+                    self.history.insert(0, {"role": "system", "content": msg})
         
         # Start background thread for API call
         threading.Thread(target=self._call_api, daemon=True).start()
@@ -526,57 +592,21 @@ class ChatGUI(tk.Tk):
                 self._print_message("\n[Conversation ended by AI - no further investigation needed]\n", "system")
                 self.conversation_ended = True
                 self.history.append({"role": "assistant", "content": ai_response})
-            # Check if AI wants to execute curl (if curl is enabled)
-            elif self.curl_enabled:
-                curl_cmd = self.detect_curl_request(ai_response)
-                if curl_cmd:
-                    # Extract domain from the curl command
-                    domain_match = re.search(r'https?://([^/\s]+)', curl_cmd)
-                    if domain_match:
-                        domain = domain_match.group(1)
-                        # Check if the domain has been verified to exist
-                        if domain not in self.checked_domains:
-                            # First check if the domain exists
-                            self._print_message(f"\n[Checking if domain {domain} exists before proceeding...]\n", "system")
-                            check_cmd = f"curl -k -I https://{domain}"
-                            check_output = local_curl(check_cmd)
-                            
-                            if "Could not resolve host" in check_output or "Connection refused" in check_output:
-                                self._print_message(f"\n[Domain {domain} does not exist or is not accessible. Skipping command.]\n", "system")
-                                self.history.append({"role": "assistant", "content": ai_response})
-                            else:
-                                self._print_message(f"\n[Domain {domain} exists. Proceeding with command execution.]\n", "system")
-                                self.checked_domains.add(domain)
-                                
-                                # Check if the command is trying to fetch a large file
-                                if any(extension in curl_cmd.lower() for extension in ['.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.pdf']):
-                                    self._print_message(
-                                        f"\n[Skipping curl command to avoid fetching large file: {curl_cmd}]\n", 
-                                        "system"
-                                    )
-                                    self.history.append({"role": "assistant", "content": ai_response})
-                                else:
-                                    self._execute_curl_for_ai(curl_cmd, ai_response)
-                        else:
-                            # Domain already checked, proceed with command
-                            # Check if the command is trying to fetch a large file
-                            if any(extension in curl_cmd.lower() for extension in ['.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.pdf']):
-                                self._print_message(
-                                    f"\n[Skipping curl command to avoid fetching large file: {curl_cmd}]\n", 
-                                    "system"
-                                )
-                                self.history.append({"role": "assistant", "content": ai_response})
-                            else:
-                                self._execute_curl_for_ai(curl_cmd, ai_response)
-                    else:
-                        # No domain found in the command, execute it directly
-                        self._execute_curl_for_ai(curl_cmd, ai_response)
-                else:
-                    # Just add the response to history
-                    self.history.append({"role": "assistant", "content": ai_response})
             else:
-                # Just add the response to history
-                self.history.append({"role": "assistant", "content": ai_response})
+                # Check if AI wants to use any enabled tool
+                tool_used = False
+                for tool_name, tool in self.tools.items():
+                    if tool.enabled:
+                        command = tool.detect_request(ai_response)
+                        if command:
+                            # Execute the tool
+                            self._execute_tool_for_ai(tool, command, ai_response)
+                            tool_used = True
+                            break
+                
+                # If no tool was used, just add the response to history
+                if not tool_used:
+                    self.history.append({"role": "assistant", "content": ai_response})
             
         except requests.exceptions.Timeout:
             self._print_message("\n[Error: Request timed out]\n", "error")
@@ -590,35 +620,36 @@ class ChatGUI(tk.Tk):
                 self.is_sending = False
                 self.send_button.config(state="normal", text="Send")
     
-    def _execute_curl_for_ai(self, curl_cmd: str, ai_response: str):
-        """Execute a curl command requested by the AI and feed results back."""
-        self._print_message(f"\n[Executing curl command: {curl_cmd}]\n", "system")
+    def _execute_tool_for_ai(self, tool, command: str, ai_response: str):
+        """Execute a tool command requested by the AI and feed results back."""
+        self._print_message(f"\n[Executing {tool.name} command: {command}]\n", "system")
         
-        # Execute the curl command (will have -k added automatically)
-        curl_output = local_curl(curl_cmd)
+        # Execute the tool command
+        tool_output = tool.execute(command)
         
         # Truncate output if it's too large (over 2000 characters)
-        if len(curl_output) > 2000:
-            curl_output = curl_output[:2000] + "\n\n[Output truncated due to size limitations]"
+        if len(tool_output) > 2000:
+            tool_output = tool_output[:2000] + "\n\n[Output truncated due to size limitations]"
         
-        # Display the curl output
-        self._print_message(f"[Curl output: {curl_output}]\n", "system")
+        # Display the tool output
+        self._print_message(f"[{tool.name} output: {tool_output}]\n", "system")
         
         # Add the AI's response to history
         self.history.append({"role": "assistant", "content": ai_response})
         
-        # Add curl results as a follow-up message and get AI to process it
-        curl_result_msg = f"The curl command returned:\n{curl_output}"
-        self.history.append({"role": "user", "content": curl_result_msg})
+        # Add tool results as a follow-up message and get AI to process it
+        tool_result_msg = f"The {tool.name} command returned:\n{tool_output}"
+        self.history.append({"role": "user", "content": tool_result_msg})
         
-        # Ask AI to process the curl results
-        self._print_message("AI (processing curl results): ", "assistant")
+        # Ask AI to process the tool results
+        self._print_message(f"AI (processing {tool.name} results): ", "assistant")
         
-        # Make another API call to process the curl results
+        # Make another API call to process the tool results
         threading.Thread(target=self._call_api, daemon=True).start()
 
 
 # ---------- Main ----------
 if __name__ == "__main__":
+    print("Starting EragAPI Chat Client...")
     app = ChatGUI()
     app.mainloop()
