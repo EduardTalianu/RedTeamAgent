@@ -223,6 +223,35 @@ class OllamaClient(BaseClient):
         )
         return response if stream else response.choices[0].text
 
+class ZAIClient(BaseClient):
+    def __init__(self, model="glm-4.5-flash"):
+        api_key = os.getenv("ZAI_API_KEY")
+        if not api_key:
+            raise ValueError("ZAI_API_KEY not found in environment variables")
+        
+        # Updated to use the correct base URL from Z.ai documentation
+        self.client = OpenAI(
+            base_url="https://api.z.ai/api/paas/v4/",
+            api_key=api_key
+        )
+        self.model = model
+
+    def chat(self, messages, temperature=0.7, max_tokens=None, stream=False):
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=stream
+            )
+            return response if stream else response.choices[0].message.content
+        except Exception as e:
+            raise Exception(f"Z.ai API error: {e}")
+
+    def complete(self, prompt, temperature=0.7, max_tokens=None, stream=False):
+        return self.chat([{"role": "user", "content": prompt}], temperature, max_tokens, stream)
+
 class EragAPI:
     CLIENTS = {
         "groq": GroqClient,
@@ -230,7 +259,8 @@ class EragAPI:
         "cohere": CohereClient,
         "deepseek": DeepSeekClient,
         "moonshot": MoonshotClient,
-        "ollama": OllamaClient
+        "ollama": OllamaClient,
+        "z": ZAIClient
     }
 
     def __init__(self, api_type, model=None):
@@ -243,8 +273,9 @@ class EragAPI:
             "gemini": "gemini-pro",
             "cohere": "command",
             "deepseek": "deepseek-chat",
-            "moonshot": "kimi-k2-0905-preview",  # Updated to use the correct model
-            "ollama": "llama2"
+            "moonshot": "kimi-k2-0905-preview",
+            "ollama": "llama2",
+            "z": "glm-4.5-flash"
         }[api_type]
 
     def chat(self, messages, temperature=0.7, max_tokens=None, stream=False):
@@ -281,7 +312,7 @@ class GenerateRequest(BaseModel):
 def parse_model_string(model_string):
     """Parse model string in format 'provider-model_name' where model_name may contain hyphens"""
     # Known providers
-    providers = ["groq", "gemini", "cohere", "deepseek", "moonshot", "ollama"]
+    providers = ["groq", "gemini", "cohere", "deepseek", "moonshot", "ollama", "z"]
     
     for provider in providers:
         if model_string.startswith(provider + "-"):
@@ -400,7 +431,7 @@ async def chat_endpoint(request: ChatRequest):
                                 elif chunk.type == 'stream-end':
                                     break
                     else:
-                        # OpenAI-compatible format (Groq, DeepSeek, Moonshot, Ollama)
+                        # OpenAI-compatible format (Groq, DeepSeek, Moonshot, Ollama, Z.ai)
                         for chunk in stream:
                             formatted = format_sse_chunk(chunk)
                             if formatted:
@@ -615,6 +646,21 @@ def get_available_models(api_type):
                 # Return fallback models if there's an error
                 return ["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k", "kimi-k2-0905-preview"]
         
+        elif api_type == "z":
+            # Hardcoded list of Z.ai models based on their documentation
+            return [
+                "glm-4.5",           # Latest flagship model
+                "glm-4.5-flash",     # Fast version of GLM-4.5
+                "glm-4.5v",          # Visual model
+                "glm-4.5-air",       # Efficient version
+                "glm-4.5-airx",      # Enhanced efficient version
+                "glm-4-32b-0414-128k", # Cost-effective model with large context
+                "glm-4",             # Previous generation
+                "glm-4-air",         # Efficient version of GLM-4
+                "glm-4-airx",        # Enhanced efficient version of GLM-4
+                "glm-3-turbo"        # Older model
+            ]
+        
         else:
             return []
             
@@ -627,14 +673,18 @@ def main():
     parser.add_argument("--api", choices=EragAPI.CLIENTS.keys(), help="API provider override")
     
     subparsers = parser.add_subparsers(dest="command")
+    
+    # Serve command
     serve_parser = subparsers.add_parser("serve", help="Start API server")
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=11436)
     serve_parser.add_argument("--tray", action="store_true")
     
+    # Model command
     model_parser = subparsers.add_parser("model", help="Model operations")
     model_subparsers = model_parser.add_subparsers(dest="model_command")
     
+    # List subcommand
     list_parser = model_subparsers.add_parser("list", help="List available models")
     list_parser.add_argument("--api", choices=EragAPI.CLIENTS.keys(), help="Only list models for specific API")
     
