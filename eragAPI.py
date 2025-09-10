@@ -169,6 +169,35 @@ class DeepSeekClient(BaseClient):
     def complete(self, prompt, temperature=0.7, max_tokens=None, stream=False):
         return self.chat([{"role": "user", "content": prompt}], temperature, max_tokens, stream)
 
+class MoonshotClient(BaseClient):
+    def __init__(self, model="kimi-k2-0905-preview"):
+        api_key = os.getenv("MOONSHOT_API_KEY")
+        if not api_key:
+            raise ValueError("MOONSHOT_API_KEY not found in environment variables")
+        
+        # Updated to use the correct base URL from the official documentation
+        self.client = OpenAI(
+            base_url="https://api.moonshot.ai/v1",  # Corrected base URL
+            api_key=api_key
+        )
+        self.model = model
+
+    def chat(self, messages, temperature=0.7, max_tokens=None, stream=False):
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=stream
+            )
+            return response if stream else response.choices[0].message.content
+        except Exception as e:
+            raise Exception(f"Moonshot API error: {e}")
+
+    def complete(self, prompt, temperature=0.7, max_tokens=None, stream=False):
+        return self.chat([{"role": "user", "content": prompt}], temperature, max_tokens, stream)
+
 class OllamaClient(BaseClient):
     def __init__(self, model="llama2"):
         self.client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
@@ -200,6 +229,7 @@ class EragAPI:
         "gemini": GeminiClient,
         "cohere": CohereClient,
         "deepseek": DeepSeekClient,
+        "moonshot": MoonshotClient,
         "ollama": OllamaClient
     }
 
@@ -213,6 +243,7 @@ class EragAPI:
             "gemini": "gemini-pro",
             "cohere": "command",
             "deepseek": "deepseek-chat",
+            "moonshot": "kimi-k2-0905-preview",  # Updated to use the correct model
             "ollama": "llama2"
         }[api_type]
 
@@ -250,7 +281,7 @@ class GenerateRequest(BaseModel):
 def parse_model_string(model_string):
     """Parse model string in format 'provider-model_name' where model_name may contain hyphens"""
     # Known providers
-    providers = ["groq", "gemini", "cohere", "deepseek", "ollama"]
+    providers = ["groq", "gemini", "cohere", "deepseek", "moonshot", "ollama"]
     
     for provider in providers:
         if model_string.startswith(provider + "-"):
@@ -369,7 +400,7 @@ async def chat_endpoint(request: ChatRequest):
                                 elif chunk.type == 'stream-end':
                                     break
                     else:
-                        # OpenAI-compatible format (Groq, DeepSeek, Ollama)
+                        # OpenAI-compatible format (Groq, DeepSeek, Moonshot, Ollama)
                         for chunk in stream:
                             formatted = format_sse_chunk(chunk)
                             if formatted:
@@ -511,14 +542,12 @@ def get_available_models(api_type):
         
         elif api_type == "groq":
             if not os.getenv("GROQ_API_KEY"):
-                print("GROQ_API_KEY not found in environment")
                 return []
             client = Groq(api_key=os.getenv("GROQ_API_KEY"))
             return [model.id for model in client.models.list().data]
         
         elif api_type == "gemini":
             if not os.getenv("GEMINI_API_KEY"):
-                print("GEMINI_API_KEY not found in environment")
                 return []
             genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
             models = []
@@ -531,7 +560,6 @@ def get_available_models(api_type):
         
         elif api_type == "cohere":
             if not os.getenv("CO_API_KEY"):
-                print("CO_API_KEY not found in environment")
                 return []
             # Use ClientV2 for model listing
             client = cohere.ClientV2(api_key=os.getenv("CO_API_KEY"))
@@ -541,13 +569,53 @@ def get_available_models(api_type):
         
         elif api_type == "deepseek":
             if not os.getenv("DEEPSEEK_API_KEY"):
-                print("DEEPSEEK_API_KEY not found in environment")
                 return []
             # Return both chat and reasoner models
             return ["deepseek-chat", "deepseek-reasoner"]
         
+        elif api_type == "moonshot":
+            api_key = os.getenv("MOONSHOT_API_KEY")
+            if not api_key:
+                return []
+            
+            # Try direct HTTP request first with the corrected base URL
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            try:
+                # Test the models endpoint with the corrected base URL
+                response = requests.get(
+                    "https://api.moonshot.ai/v1/models",  # Corrected base URL
+                    headers=headers
+                )
+                
+                if response.status_code == 200:
+                    models_data = response.json()
+                    return [model['id'] for model in models_data.get('data', [])]
+                else:
+                    # Try a minimal chat completion to test the API key with the corrected base URL
+                    chat_data = {
+                        "model": "kimi-k2-0905-preview",
+                        "messages": [{"role": "user", "content": "Hello"}],
+                        "max_tokens": 5
+                    }
+                    
+                    chat_response = requests.post(
+                        "https://api.moonshot.ai/v1/chat/completions",  # Corrected base URL
+                        headers=headers,
+                        json=chat_data
+                    )
+                    
+                    # If both tests fail, return updated fallback models
+                    return ["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k", "kimi-k2-0905-preview"]
+                    
+            except Exception:
+                # Return fallback models if there's an error
+                return ["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k", "kimi-k2-0905-preview"]
+        
         else:
-            print(f"Unknown API type: {api_type}")
             return []
             
     except Exception as e:
