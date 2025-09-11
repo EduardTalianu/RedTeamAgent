@@ -93,19 +93,14 @@ class Web_search:
                 if query_elem is not None and query_elem.text:
                     query = query_elem.text.strip()
                 else:
-                    # Try alternative format: <parameter_name>query</parameter_name><parameter_value>value</parameter_value>
+                    # Try alternative format: <parameter_name>query</parameter_name><value>value</value>
                     param_names = params_elem.findall('parameter_name')
-                    param_values = params_elem.findall('parameter_value')
+                    param_values = params_elem.findall('value')
                     
-                    if param_names and not param_values:
-                        # Handle case where query is directly in parameter_name
-                        if len(param_names) == 1:
-                            query = param_names[0].text.strip()
-                    else:
-                        for i, name_elem in enumerate(param_names):
-                            if i < len(param_values) and name_elem.text and name_elem.text.lower() == 'query':
-                                query = param_values[i].text.strip()
-                                break
+                    for i, name_elem in enumerate(param_names):
+                        if i < len(param_values) and name_elem.text and name_elem.text.lower() == 'query':
+                            query = param_values[i].text.strip() if param_values[i] else ""
+                            break
                     
                     # Another alternative format: <parameter name="query">value</parameter>
                     param_elems = params_elem.findall('parameter')
@@ -113,17 +108,12 @@ class Web_search:
                         if param.get('name', '').lower() == 'query' and param.text:
                             query = param.text.strip()
                             break
-                    
-                    # Yet another alternative: <parameter_name>actual query text</parameter_name>
-                    if not query and param_names:
-                        for name_elem in param_names:
-                            if name_elem.text and name_elem.text.lower() not in ['query', 'command']:
-                                query = name_elem.text.strip()
-                                break
-            
-            if query and len(query) > 2:
-                return query
-                    
+                
+                if query and len(query) > 2:
+                    return query
+                        
+            return None
+                        
         except Exception as e:
             print(f"Error parsing XML: {str(e)}")
         
@@ -178,16 +168,20 @@ class Web_search:
         try:
             if 'DDGS' in globals() and DDGS is not None:
                 with DDGS() as ddgs:
-                    gen = ddgs.text(query, max_results=self.max_results)
-                    for r in gen:
+                    # Remove max_results parameter and limit results manually
+                    gen = ddgs.text(query)
+                    for i, r in enumerate(gen):
+                        if i >= self.max_results:  # Limit results manually
+                            break
                         title = r.get('title') or r.get('headline') or ''
                         snippet = r.get('body') or r.get('snippet') or ''
                         href = r.get('href') or r.get('url') or r.get('link') or ''
                         out.append({'title': title.strip(), 'snippet': snippet.strip(), 'url': href})
             else:
                 # try ddg() function (returns a list of dicts)
-                raw = ddg(query, max_results=self.max_results)
-                for r in raw:
+                # Remove max_results parameter and limit results manually
+                raw = ddg(query)
+                for r in raw[:self.max_results]:  # Limit results manually
                     title = r.get('title') or r.get('headline') or ''
                     snippet = r.get('body') or r.get('snippet') or ''
                     href = r.get('href') or r.get('url') or r.get('link') or ''
@@ -209,7 +203,7 @@ class Web_search:
                 'url': u
             })
         return final
-    
+        
     def _search_ddg_html(self, query: str):
         """Best-effort scraping of DuckDuckGo HTML results (no client lib needed)."""
         headers = {'User-Agent': random.choice(self.user_agents)}
@@ -305,6 +299,25 @@ class Web_search:
             "  <name>web_search</name>\n"
             "  <parameters>\n"
             "    <query>your search query</query>\n"
+            "  </parameters>\n"
+            "</tool>\n"
+            "```\n\n"
+            "Examples:\n"
+            "1. To search for the latest Python version:\n"
+            "```xml\n"
+            "<tool>\n"
+            "  <name>web_search</name>\n"
+            "  <parameters>\n"
+            "    <query>latest Python version 2023</query>\n"
+            "  </parameters>\n"
+            "</tool>\n"
+            "```\n\n"
+            "2. To find information about a recent event:\n"
+            "```xml\n"
+            "<tool>\n"
+            "  <name>web_search</name>\n"
+            "  <parameters>\n"
+            "    <query>latest AI breakthroughs 2023</query>\n"
             "  </parameters>\n"
             "</tool>\n"
             "```\n\n"

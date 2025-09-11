@@ -524,51 +524,34 @@ class ChatGUI(tk.Tk):
         
         # Add system messages for enabled tools
         if len(self.history) == 1:  # First message
-            system_messages = []
-            
-            # Create a summary of enabled tools
+            # Create a summary of enabled tools with their proper system prompts
             enabled_tools = []
+            detailed_tool_instructions = []
+            
             for tool_name, tool in self.tools.items():
                 if tool.enabled:
                     enabled_tools.append(f"- {tool.name}: {tool.description}")
+                    
+                    # Get the detailed system prompt from the tool
+                    if hasattr(tool, 'get_system_prompt'):
+                        detailed_tool_instructions.append(tool.get_system_prompt())
             
-            # In the send_message method, update the system message for tools:
             if enabled_tools:
-                # Add tool summary as the first system message
+                # Add general tool summary
                 tool_summary = {
                     "role": "system",
                     "content": "You have access to the following tools:\n" + "\n".join(enabled_tools) + 
-                            "\n\nTo use a tool, include an XML command in your response using this format:\n"
-                            "```xml\n"
-                            "<tool>\n"
-                            "  <name>tool_name</name>\n"
-                            "  <parameters>\n"
-                            "    <parameter_name>value</parameter_name>\n"
-                            "  </parameters>\n"
-                            "</tool>\n"
-                            "```\n\n"
-                            "Only include this format when you actually want to execute the tool. "
-                            "Do not include it in your thinking process or examples unless you want it to be executed."
+                            "\n\nEach tool has specific usage instructions that will be provided separately."
                 }
                 self.history.insert(0, tool_summary)
-
-           
-            # Add penetration testing guidelines if relevant tools are enabled
-            pentest_tools = [tool for tool in self.tools.values() if tool.enabled and tool.name in ["Curl"]]
-            if pentest_tools:
-                general_guidelines = {
-                    "role": "system",
-                    "content": (
-                        "GENERAL TOOL USAGE GUIDELINES:\n"
-                        "1. Use tools when you need up-to-date information, specific data, or to perform actions beyond your knowledge.\n"
-                        "2. When using a tool, use the XML format specified in the tool description.\n"
-                        "3. After receiving tool results, analyze them and provide a comprehensive response.\n"
-                        "4. If a tool fails, try an alternative approach or explain the limitation.\n"
-                        "5. For web searches, be specific with your query to get the most relevant results.\n"
-                        "6. For curl commands, keep them simple and use common APIs or websites."
-                    )
-                }
-                self.history.insert(3, general_guidelines)
+                
+                # Add detailed instructions for each enabled tool
+                for instruction in detailed_tool_instructions:
+                    detailed_instruction = {
+                        "role": "system",
+                        "content": instruction
+                    }
+                    self.history.insert(-1, detailed_instruction)  # Insert before user message
         
         # Start background thread for API call
         threading.Thread(target=self._call_api, daemon=True).start()
@@ -643,13 +626,71 @@ class ChatGUI(tk.Tk):
                 self.is_sending = False
                 self.send_button.config(state="normal", text="Send")
     
-    # In tk_erag.py, in the _execute_tool_for_ai method
-    def _execute_tool_for_ai(self, tool, command: str, ai_response: str):
+    def _execute_tool_for_ai(self, tool, command, ai_response: str):
         """Execute a tool command requested by the AI and feed results back."""
-        self._print_message(f"\n[Executing {tool.name} with command: {command}]\n", "system")
-        
-        # Execute the tool
-        tool_output = tool.execute(command)
+        # Handle different types of commands
+        if command == "LIST_COMMANDS":
+            self._print_message(f"\n[Listing available {tool.name} commands]\n", "system")
+            tool_output = tool.execute(command)
+        elif isinstance(command, dict):
+            # New format with parsed parameters
+            self._print_message(f"\n[Executing {tool.name} with command ID {command.get('command_id', 'unknown')} on target: {command.get('target', 'unknown')}]\n", "system")
+            tool_output = tool.execute(command)
+        elif isinstance(command, str) and command.startswith("CURL_COMMAND_"):
+            # Handle basic detection that wasn't properly parsed - try to extract from AI response
+            self._print_message(f"\n[Detected curl command request, parsing AI response...]\n", "system")
+            
+            # Try to extract command_id and target from the AI response text
+            import re
+            
+            # Look for patterns like "command ID 2" or "command_id: 2"
+            id_patterns = [
+                r'command\s+id\s+(\d+)',
+                r'command_id:\s*(\d+)',
+                r'command\s+(\d+)',
+                r'id\s+(\d+)'
+            ]
+            
+            command_id = None
+            for pattern in id_patterns:
+                match = re.search(pattern, ai_response, re.IGNORECASE)
+                if match:
+                    try:
+                        command_id = int(match.group(1))
+                        break
+                    except:
+                        continue
+            
+            # Look for URL patterns
+            url_patterns = [
+                r'https?://[^\s]+',
+                r'target:\s*(https?://[^\s]+)',
+                r'url:\s*(https?://[^\s]+)'
+            ]
+            
+            target_url = None
+            for pattern in url_patterns:
+                match = re.search(pattern, ai_response, re.IGNORECASE)
+                if match:
+                    if pattern.startswith('target:') or pattern.startswith('url:'):
+                        target_url = match.group(1)
+                    else:
+                        target_url = match.group(0)
+                    break
+            
+            if command_id and target_url:
+                parsed_command = {
+                    'command_id': command_id,
+                    'target': target_url
+                }
+                self._print_message(f"[Parsed: command_id={command_id}, target={target_url}]\n", "system")
+                tool_output = tool.execute(parsed_command)
+            else:
+                tool_output = f"Could not parse command from AI response. Please use proper XML format:\n```xml\n<tool>\n  <name>curl</name>\n  <parameters>\n    <command_id>2</command_id>\n    <target>https://example.com</target>\n  </parameters>\n</tool>\n```"
+        else:
+            # Legacy format
+            self._print_message(f"\n[Executing {tool.name} with command: {command}]\n", "system")
+            tool_output = tool.execute(command)
         
         # Truncate output if it's too large (over 2000 characters)
         if len(tool_output) > 2000:

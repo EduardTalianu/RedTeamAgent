@@ -1,0 +1,204 @@
+{
+  "commands": [
+    {
+      "id": 1,
+      "name": "Basic GET Request",
+      "description": "Simple GET request to fetch a webpage or API endpoint",
+      "template": "curl -k -s {target}",
+      "category": "basic",
+      "output_type": "webpage"
+    },
+    {
+      "id": 2,
+      "name": "GET with Headers",
+      "description": "GET request showing response headers",
+      "template": "curl -k -I {target}",
+      "category": "headers",
+      "output_type": "headers"
+    },
+    {
+      "id": 3,
+      "name": "GET with Verbose Output",
+      "description": "GET request with detailed connection information",
+      "template": "curl -k -v {target}",
+      "category": "debug",
+      "output_type": "verbose"
+    },
+    {
+      "id": 4,
+      "name": "GET with User Agent",
+      "description": "GET request with custom user agent",
+      "template": "curl -k -s -H \"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\" {target}",
+      "category": "basic",
+      "output_type": "webpage"
+    },
+    {
+      "id": 5,
+      "name": "JSON API GET",
+      "description": "GET request with JSON headers for API calls",
+      "template": "curl -k -s -H \"Accept: application/json\" -H \"Content-Type: application/json\" {target}",
+      "category": "api",
+      "output_type": "json"
+    },
+    {
+      "id": 6,
+      "name": "POST JSON Data",
+      "description": "POST request with JSON payload (requires additional data parameter)",
+      "template": "curl -k -s -X POST -H \"Content-Type: application/json\" -d '{{\"test\": \"data\"}}' {target}",
+      "category": "api",
+      "output_type": "json"
+    },
+    {
+      "id": 7,
+      "name": "PUT JSON Data",
+      "description": "PUT request with JSON payload (requires additional data parameter)",
+      "template": "curl -k -s -X PUT -H \"Content-Type: application/json\" -d '{{\"test\": \"data\"}}' {target}",
+      "category": "api",
+      "output_type": "json"
+    },
+    {
+      "id": 8,
+      "name": "DELETE Request",
+      "description": "DELETE request to remove a resource",
+      "template": "curl -k -s -X DELETE {target}",
+      "category": "api",
+      "output_type": "response"
+    },
+    {
+      "id": 9,
+      "name": "HEAD Request",
+      "description": "HEAD request to get only response headers without body",
+      "template": "curl -k -I -X HEAD {target}",
+      "category": "headers",
+      "output_type": "headers"
+    },
+    {
+      "id": 10,
+      "name": "Follow Redirects",
+      "description": "GET request that follows redirects automatically",
+      "template": "curl -k -s -L {target}",
+      "category": "basic",
+      "output_type": "webpage"
+    },
+    {
+      "id": 11,
+      "name": "Download File",
+      "description": "Download a file and save it locally",
+      "template": "curl -k -s -O {target}",
+      "category": "download",
+      "output_type": "file"
+    },
+    {
+      "id": 12,
+      "name": "Basic Authentication",
+      "description": "GET request with basic authentication (requires username:password)",
+      "template": "curl -k -s -u \"user:pass\" {target}",
+      "category": "auth",
+      "output_type": "webpage"
+    },
+    {
+      "id": 13,
+      "name": "Bearer Token Auth",
+      "description": "GET request with Bearer token authorization",
+      "template": "curl -k -s -H \"Authorization: Bearer YOUR_TOKEN\" {target}",
+      "category": "auth",
+      "output_type": "json"
+    },
+    {
+      "id": 14,
+      "name": "Cookie Request",
+      "description": "GET request with cookie support",
+      "template": "curl -k -s -c cookies.txt -b cookies.txt {target}",
+      "category": "session",
+      "output_type": "webpage"
+    },
+    {
+      "id": 15,
+      "name": "Form Data POST",
+      "description": "POST request with form-encoded data",
+      "template": "curl -k -s -X POST -d \"field1=value1&field2=value2\" {target}",
+      "category": "forms",
+      "output_type": "response"
+    },
+    {
+      "id": 16,
+      "name": "File Upload POST",
+      "description": "POST request to upload a file",
+      "template": "curl -k -s -X POST -F \"file=@filename.txt\" {target}",
+      "category": "upload",
+      "output_type": "response"
+    },
+    {
+      "id": 17,
+      "name": "XML API Request",
+      "description": "GET request for XML API endpoints",
+      "template": "curl -k -s -H \"Accept: application/xml\" -H \"Content-Type: application/xml\" {target}",
+      "category": "api",
+      "output_type": "xml"
+    },
+    {
+      "id": 18,
+      "name": "GraphQL Query",
+      "description": "POST request for GraphQL endpoints",
+      "template": "curl -k -s -X POST -H \"Content-Type: application/json\" -d '{{\"query\": \"{{ users {{ id name }} }}\"}}' {target}",
+      "category": "api",
+      "output_type": "json"
+    },
+    {
+      "id": 19,
+      "name": "WebDAV PROPFIND",
+      "description": "PROPFIND request for WebDAV servers",
+      "template": "curl -k -s -X PROPFIND -H \"Depth: 1\" {target}",
+      "category": "webdav",
+      "output_type": "xml"
+    },
+    {
+      "id": 20,
+      "name": "OPTIONS Request",
+      "description": "OPTIONS request to discover allowed methods",
+      "template": "curl -k -s -X OPTIONS {target}",
+      "category": "discovery",
+      "output_type": "headers"
+    },
+    {
+      "id": 21,
+      "name": "PATCH Request",
+      "description": "PATCH request for partial updates",
+      "template": "curl -k -s -X PATCH -H \"Content-Type: application/json\" -d '{{\"field\": \"new_value\"}}' {target}",
+      "category": "api",
+      "output_type": "json"
+    },
+    {
+      "id": 22,
+      "name": "Timeout Request",
+      "description": "GET request with connection timeout",
+      "template": "curl -k -s --connect-timeout 5 --max-time 10 {target}",
+      "category": "basic",
+      "output_type": "webpage"
+    },
+    {
+      "id": 23,
+      "name": "Proxy Request",
+      "description": "GET request through HTTP proxy",
+      "template": "curl -k -s --proxy http://proxy:8080 {target}",
+      "category": "proxy",
+      "output_type": "webpage"
+    },
+    {
+      "id": 24,
+      "name": "Certificate Info",
+      "description": "Get SSL certificate information",
+      "template": "curl -k -s -I --cert-status {target}",
+      "category": "ssl",
+      "output_type": "headers"
+    },
+    {
+      "id": 25,
+      "name": "Rate Limited Request",
+      "description": "GET request with rate limiting (slow)",
+      "template": "curl -k -s --limit-rate 100k {target}",
+      "category": "basic",
+      "output_type": "webpage"
+    }
+  ]
+}
