@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Tkinter chat client for EragAPI — works with the server.
-Handles streaming responses and provides plugin support for tools.
+Handles streaming responses and provides plugin support for tools including MCP tools.
 """
 import datetime
 import importlib.util
@@ -14,9 +14,11 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, scrolledtext
 import requests
 import re
+from typing import Dict, List, Optional, Any
 
 DEFAULT_SERVER = "http://127.0.0.1:11436"
 TOOLS_DIR = "tools"
+MCP_DIR = "mcp"
 
 # ---------- helpers ----------
 def get_models(server: str) -> dict:
@@ -117,49 +119,82 @@ def parse_sse_response(response):
 
 # ---------- Tool Loading System ----------
 class ToolLoader:
-    """Dynamically loads tools from the tools directory."""
+    """Dynamically loads tools from both legacy tools directory and MCP directory."""
     
     @staticmethod
     def load_tools():
-        """Load all available tools from the tools directory."""
+        """Load all available tools from both tools and mcp directories."""
         tools = {}
         
         # Get the directory where the script is located
         script_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        # Add mcp directory to Python path temporarily
+        mcp_path = os.path.join(script_dir, MCP_DIR)
+        if mcp_path not in sys.path:
+            sys.path.insert(0, mcp_path)
+        
+        # Load legacy tools from tools directory
         tools_path = os.path.join(script_dir, TOOLS_DIR)
+        if os.path.exists(tools_path):
+            print(f"Looking for legacy tools in: {tools_path}")
+            for filename in os.listdir(tools_path):
+                if filename.endswith('.py') and filename != '__init__.py':
+                    tool_name = filename[:-3]  # Remove .py extension
+                    try:
+                        # Import the module
+                        module_path = os.path.join(tools_path, filename)
+                        print(f"Loading legacy tool from: {module_path}")
+                        
+                        spec = importlib.util.spec_from_file_location(tool_name, module_path)
+                        module = importlib.util.module_from_spec(spec)
+                        spec.loader.exec_module(module)
+                        
+                        # Get the tool class (assumed to be the same name as the file)
+                        class_name = tool_name.capitalize()
+                        if hasattr(module, class_name):
+                            tool_class = getattr(module, class_name)
+                            tool_instance = tool_class()
+                            # Enable tools by default
+                            tool_instance.enabled = True
+                            tools[tool_name] = tool_instance
+                            print(f"Successfully loaded legacy tool: {tool_name} ({class_name})")
+                        else:
+                            print(f"Error: Class {class_name} not found in {filename}")
+                    except Exception as e:
+                        print(f"Error loading legacy tool {tool_name}: {e}")
         
-        # Ensure tools directory exists
-        if not os.path.exists(tools_path):
-            print(f"Creating tools directory at: {tools_path}")
-            os.makedirs(tools_path)
-            return tools
-        
-        print(f"Looking for tools in: {tools_path}")
-        
-        # Load all Python files in tools directory (except __init__.py)
-        for filename in os.listdir(tools_path):
-            if filename.endswith('.py') and filename != '__init__.py':
-                tool_name = filename[:-3]  # Remove .py extension
-                try:
-                    # Import the module
-                    module_path = os.path.join(tools_path, filename)
-                    print(f"Loading tool from: {module_path}")
-                    
-                    spec = importlib.util.spec_from_file_location(tool_name, module_path)
-                    module = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(module)
-                    
-                    # Get the tool class (assumed to be the same name as the file)
-                    class_name = tool_name.capitalize()
-                    if hasattr(module, class_name):
-                        tool_class = getattr(module, class_name)
-                        tool_instance = tool_class()
-                        tools[tool_name] = tool_instance
-                        print(f"Successfully loaded tool: {tool_name} ({class_name})")
-                    else:
-                        print(f"Error: Class {class_name} not found in {filename}")
-                except Exception as e:
-                    print(f"Error loading tool {tool_name}: {e}")
+        # Load MCP tools from mcp directory
+        if os.path.exists(mcp_path):
+            print(f"Looking for MCP tools in: {mcp_path}")
+            for filename in os.listdir(mcp_path):
+                if filename.endswith('.py') and filename != '__init__.py' and filename.startswith('mcp_'):
+                    # Skip non-tool files
+                    if filename in ['mcp_base.py', 'mcp_registry.py']:
+                        continue
+                    tool_name = filename[:-3]  # Remove .py extension
+                    try:
+                        # Import the module
+                        module_path = os.path.join(mcp_path, filename)
+                        print(f"Loading MCP tool from: {module_path}")
+                        
+                        spec = importlib.util.spec_from_file_location(tool_name, module_path)
+                        module = importlib.util.module_from_spec(spec)
+                        spec.loader.exec_module(module)
+                        
+                        # Get the tool class (assumed to be the same name as the file, capitalized)
+                        class_name = ''.join(word.capitalize() for word in tool_name.split('_'))
+                        if hasattr(module, class_name):
+                            tool_class = getattr(module, class_name)
+                            tool_instance = tool_class()
+                            # Enable tools by default
+                            tool_instance.enabled = True
+                            tools[tool_name] = tool_instance
+                            print(f"Successfully loaded MCP tool: {tool_name} ({class_name})")
+                        else:
+                            print(f"Error: Class {class_name} not found in {filename}")
+                    except Exception as e:
+                        print(f"Error loading MCP tool {tool_name}: {e}")
         
         print(f"Total tools loaded: {len(tools)}")
         return tools
@@ -168,7 +203,7 @@ class ToolLoader:
 class ChatGUI(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("EragAPI Chat — Tkinter Client")
+        self.title("EragAPI Chat — Tkinter Client with MCP Support")
         self.geometry("900x700")
         
         # Configuration
@@ -192,8 +227,15 @@ class ChatGUI(tk.Tk):
         # Welcome message
         welcome_msg = "Welcome! Select a model and start chatting.\n"
         if self.tools:
-            welcome_msg += "Available tools: " + ", ".join([tool.name for tool in self.tools.values()]) + "\n"
-            welcome_msg += "Enable tools to allow the AI to use them.\n"
+            tool_names = []
+            for tool in self.tools.values():
+                # Use friendly_name if available, otherwise use the tool's name
+                if hasattr(tool, 'friendly_name'):
+                    tool_names.append(tool.friendly_name)
+                else:
+                    tool_names.append(tool.name)
+            welcome_msg += "Available tools: " + ", ".join(tool_names) + "\n"
+            welcome_msg += "All tools are enabled by default. Toggle them as needed.\n"
         welcome_msg += "Click 'Start Server' to launch the EragAPI server.\n"
         self._print_message(welcome_msg, "system")
     
@@ -274,14 +316,17 @@ class ChatGUI(tk.Tk):
         # Add tool buttons
         print(f"Creating buttons for {len(self.tools)} tools")
         for tool_name, tool in self.tools.items():
-            print(f"Creating button for tool: {tool_name} ({tool.name})")
+            # Get display name - use friendly_name if available
+            display_name = tool.friendly_name if hasattr(tool, 'friendly_name') else tool.name
+            print(f"Creating button for tool: {tool_name} ({display_name})")
             btn = ttk.Button(
                 tools_container,
-                text=f"Enable {tool.name}",
+                text=f"Disable {display_name}",  # Start with "Disable" since tools are enabled by default
                 command=lambda t=tool: self.toggle_tool(t)
             )
             btn.pack(side="left", padx=2)
             self.tool_buttons[tool_name] = btn
+            print(f"Button created for {tool_name}")
         
         # User action buttons container
         actions_container = ttk.Frame(tools_frame)
@@ -449,12 +494,15 @@ class ChatGUI(tk.Tk):
         tool.enabled = not tool.enabled
         button = self.tool_buttons[tool.__class__.__name__.lower()]
         
+        # Get display name - use friendly_name if available
+        display_name = tool.friendly_name if hasattr(tool, 'friendly_name') else tool.name
+        
         if tool.enabled:
-            button.config(text=f"Disable {tool.name}")
-            self._print_message(f"[{tool.name} ENABLED]\n", "system")
+            button.config(text=f"Disable {display_name}")
+            self._print_message(f"[{display_name} ENABLED]\n", "system")
         else:
-            button.config(text=f"Enable {tool.name}")
-            self._print_message(f"[{tool.name} DISABLED]\n", "system")
+            button.config(text=f"Enable {display_name}")
+            self._print_message(f"[{display_name} DISABLED]\n", "system")
     
     def clear_chat(self):
         """Clear the chat display and history."""
@@ -530,7 +578,9 @@ class ChatGUI(tk.Tk):
             
             for tool_name, tool in self.tools.items():
                 if tool.enabled:
-                    enabled_tools.append(f"- {tool.name}: {tool.description}")
+                    # Get display name - use friendly_name if available
+                    display_name = tool.friendly_name if hasattr(tool, 'friendly_name') else tool.name
+                    enabled_tools.append(f"- {display_name}: {tool.description}")
                     
                     # Get the detailed system prompt from the tool
                     if hasattr(tool, 'get_system_prompt'):
@@ -541,7 +591,22 @@ class ChatGUI(tk.Tk):
                 tool_summary = {
                     "role": "system",
                     "content": "You have access to the following tools:\n" + "\n".join(enabled_tools) + 
-                            "\n\nEach tool has specific usage instructions that will be provided separately."
+                            "\n\nIMPORTANT: When a user asks you to perform a task that requires one of these tools, "
+                            "you MUST use the appropriate tool instead of providing instructions on how to do it manually. "
+                            "For example, if a user asks for HTTP headers, use the curl tool to fetch them. "
+                            "If the user says 'use curl', you must use the curl tool. "
+                            "Do not simulate the output of the tool; actually use the tool to get the real data.\n\n"
+                            "To use a tool, you must respond with the exact XML format for the tool. For example, to use the curl tool to get headers, respond with:\n"
+                            "```xml\n"
+                            "<tool>\n"
+                            "  <name>curl</name>\n"
+                            "  <parameters>\n"
+                            "    <raw_command>curl -I</raw_command>\n"
+                            "    <target>https://example.com</target>\n"
+                            "  </parameters>\n"
+                            "</tool>\n"
+                            "```\n"
+                            "Replace the example URL with the actual URL you want to query."
                 }
                 self.history.insert(0, tool_summary)
                 
@@ -628,13 +693,16 @@ class ChatGUI(tk.Tk):
     
     def _execute_tool_for_ai(self, tool, command, ai_response: str):
         """Execute a tool command requested by the AI and feed results back."""
+        # Get display name - use friendly_name if available
+        display_name = tool.friendly_name if hasattr(tool, 'friendly_name') else tool.name
+        
         # Handle different types of commands
         if command == "LIST_COMMANDS":
-            self._print_message(f"\n[Listing available {tool.name} commands]\n", "system")
+            self._print_message(f"\n[Listing available {display_name} commands]\n", "system")
             tool_output = tool.execute(command)
         elif isinstance(command, dict):
-            # New format with parsed parameters
-            self._print_message(f"\n[Executing {tool.name} with command ID {command.get('command_id', 'unknown')} on target: {command.get('target', 'unknown')}]\n", "system")
+            # New format with parsed parameters (MCP format)
+            self._print_message(f"\n[Executing {display_name} with parameters]\n", "system")
             tool_output = tool.execute(command)
         elif isinstance(command, str) and command.startswith("CURL_COMMAND_"):
             # Handle basic detection that wasn't properly parsed - try to extract from AI response
@@ -689,7 +757,7 @@ class ChatGUI(tk.Tk):
                 tool_output = f"Could not parse command from AI response. Please use proper XML format:\n```xml\n<tool>\n  <name>curl</name>\n  <parameters>\n    <command_id>2</command_id>\n    <target>https://example.com</target>\n  </parameters>\n</tool>\n```"
         else:
             # Legacy format
-            self._print_message(f"\n[Executing {tool.name} with command: {command}]\n", "system")
+            self._print_message(f"\n[Executing {display_name} with command: {command}]\n", "system")
             tool_output = tool.execute(command)
         
         # Truncate output if it's too large (over 2000 characters)
@@ -697,17 +765,17 @@ class ChatGUI(tk.Tk):
             tool_output = tool_output[:2000] + "\n\n[Output truncated due to size limitations]"
         
         # Display the tool output
-        self._print_message(f"[{tool.name} output: {tool_output}]\n", "system")
+        self._print_message(f"[{display_name} output: {tool_output}]\n", "system")
         
         # Add the AI's response to history
         self.history.append({"role": "assistant", "content": ai_response})
         
         # Add tool results as a follow-up message and get AI to process it
-        tool_result_msg = f"The {tool.name} tool was executed with the following result:\n{tool_output}"
+        tool_result_msg = f"The {display_name} tool was executed with the following result:\n{tool_output}"
         self.history.append({"role": "user", "content": tool_result_msg})
         
         # Ask AI to process the tool results
-        self._print_message(f"AI (processing {tool.name} results): ", "assistant")
+        self._print_message(f"AI (processing {display_name} results): ", "assistant")
         
         # Make another API call to process the tool results
         threading.Thread(target=self._call_api, daemon=True).start()
@@ -715,6 +783,6 @@ class ChatGUI(tk.Tk):
 
 # ---------- Main ----------
 if __name__ == "__main__":
-    print("Starting EragAPI Chat Client...")
+    print("Starting EragAPI Chat Client with MCP Support...")
     app = ChatGUI()
     app.mainloop()
