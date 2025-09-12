@@ -1,20 +1,23 @@
 # mcp_curl.py
-import re
 import subprocess
+import re
+import xml.etree.ElementTree as ET
 import os
 import datetime
-import json
-import urllib.parse
 import shlex
 from typing import Dict, Any, List, Optional, Tuple
 from mcp_base import MCPTool
 
 class McpCurl(MCPTool):
-    """MCP-compliant curl tool for web requests and security testing."""
+    """MCP-compliant curl tool with proper command execution and results saving."""
     
     def __init__(self):
         super().__init__()
-        self.friendly_name = "Curl"  # User-friendly name for the tool
+        self.friendly_name = "Curl"
+        # Create results directory structure
+        self.results_dir = "results"
+        self.curl_results_dir = os.path.join(self.results_dir, "curl")
+        os.makedirs(self.curl_results_dir, exist_ok=True)
     
     def get_description(self) -> str:
         return "Execute curl commands for web requests, security testing, and API interaction."
@@ -81,25 +84,23 @@ class McpCurl(MCPTool):
         target = params.get("target", "")
         timeout = params.get("timeout", 30)
         
-        # Add -k option by default for HTTPS URLs to ignore SSL certificate issues
-        if target.startswith("https://"):
-            if command_type == "raw":
-                raw_command = params.get("raw_command", "")
-                if "-k" not in raw_command and "--insecure" not in raw_command:
-                    params["raw_command"] = f"{raw_command} -k"
-            elif command_type == "predefined":
-                # For predefined commands, we'll handle it in the execution method
-                pass
+        # Strip any extra whitespace or newlines from the target
+        target = target.strip()
         
         if command_type == "raw":
-            return self._execute_raw_command(params)
+            result = self._execute_raw_command(params)
         elif command_type == "predefined":
-            return self._execute_predefined_command(params)
+            result = self._execute_predefined_command(params)
         else:
             return f"Invalid command type: {command_type}"
+        
+        # Save results to file
+        self._save_curl_result(target, result)
+        
+        return result
     
     def _execute_raw_command(self, params: Dict[str, Any]) -> str:
-        """Execute raw curl command."""
+        """Execute raw curl command with proper quoting."""
         raw_command = params.get("raw_command", "")
         target = params.get("target", "")
         timeout = params.get("timeout", 30)
@@ -110,12 +111,16 @@ class McpCurl(MCPTool):
         # Build command list instead of string to avoid shell interpretation issues
         if '{target}' in raw_command:
             cmd_str = raw_command.replace('{target}', target)
-            cmd_list = shlex.split(cmd_str)
         elif target not in raw_command:
             cmd_str = f"{raw_command} {target}"
-            cmd_list = shlex.split(cmd_str)
         else:
-            cmd_list = shlex.split(raw_command)
+            cmd_str = raw_command
+        
+        # Use shlex.split to properly handle quotes
+        try:
+            cmd_list = shlex.split(cmd_str)
+        except ValueError as e:
+            return f"Command parsing error: {str(e)}"
         
         # Add -k option if it's an HTTPS URL and not already present
         if target.startswith("https://") and "-k" not in cmd_list and "--insecure" not in cmd_list:
@@ -141,7 +146,7 @@ class McpCurl(MCPTool):
             return f"CURL EXECUTION ERROR: {str(e)}"
     
     def _execute_predefined_command(self, params: Dict[str, Any]) -> str:
-        """Execute predefined curl command."""
+        """Execute predefined curl command with proper quoting."""
         command_id = params.get("command_id")
         target = params.get("target", "")
         timeout = params.get("timeout", 30)
@@ -169,8 +174,11 @@ class McpCurl(MCPTool):
             cmd_str = cmd_str.replace('YOUR_TOKEN', auth)
             cmd_str = cmd_str.replace('user:pass', auth)
         
-        # Split command into list
-        cmd_list = shlex.split(cmd_str)
+        # Use shlex.split to properly handle quotes
+        try:
+            cmd_list = shlex.split(cmd_str)
+        except ValueError as e:
+            return f"Command parsing error: {str(e)}"
         
         # Add -k option if it's an HTTPS URL and not already present
         if target.startswith("https://") and "-k" not in cmd_list and "--insecure" not in cmd_list:
@@ -207,8 +215,6 @@ class McpCurl(MCPTool):
     
     def _get_command_by_id(self, command_id: int) -> Optional[Dict[str, Any]]:
         """Get command definition by ID."""
-        # This would load from a commands file
-        # For now, return a simple example
         commands = {
             1: {
                 "name": "Basic GET",
@@ -219,6 +225,36 @@ class McpCurl(MCPTool):
                 "name": "Headers Only",
                 "template": "curl -I {target}",
                 "description": "Get headers only"
+            },
+            3: {
+                "name": "Follow Redirects",
+                "template": "curl -L {target}",
+                "description": "Follow redirects"
+            },
+            4: {
+                "name": "Verbose Output",
+                "template": "curl -v {target}",
+                "description": "Verbose output"
+            },
+            5: {
+                "name": "POST Request",
+                "template": "curl -X POST -d '{data}' {target}",
+                "description": "POST request with data"
+            },
+            6: {
+                "name": "With Headers",
+                "template": "curl -H 'Content-Type: application/json' {target}",
+                "description": "Request with custom headers"
+            },
+            7: {
+                "name": "With Authentication",
+                "template": "curl -u 'user:pass' {target}",
+                "description": "Basic authentication"
+            },
+            8: {
+                "name": "Save to File",
+                "template": "curl -o output.txt {target}",
+                "description": "Save response to file"
             }
         }
         return commands.get(command_id)
@@ -228,22 +264,31 @@ class McpCurl(MCPTool):
         # Check for XML tool format first
         if '<tool>' in text and '<name>curl</name>' in text:
             # Extract parameters from XML
-            # Note: 're' is already imported at the top of the file
-            
-            # Try to extract raw_command
-            raw_command_match = re.search(r'<raw_command>(.*?)</raw_command>', text, re.DOTALL)
-            raw_command = raw_command_match.group(1).strip() if raw_command_match else ""
-            
-            # Try to extract target
-            target_match = re.search(r'<target>(.*?)</target>', text, re.DOTALL)
-            target = target_match.group(1).strip() if target_match else ""
-            
-            if target:
-                return {
-                    "command": "raw",
-                    "raw_command": raw_command,
-                    "target": target
-                }
+            try:
+                # Try to extract the XML block
+                xml_pattern = r'```xml\s*\n*\s*(<tool>.*?</tool>)\s*\n*\s*```'
+                match = re.search(xml_pattern, text, re.IGNORECASE | re.DOTALL)
+                if match:
+                    xml_str = match.group(1)
+                else:
+                    # Try without code block
+                    simple_pattern = r'(<tool>.*?</tool>)'
+                    match = re.search(simple_pattern, text, re.IGNORECASE | re.DOTALL)
+                    if match:
+                        xml_str = match.group(1)
+                    else:
+                        # Try without proper tags
+                        fallback_pattern = r'<tool>.*?</tool>'
+                        match = re.search(fallback_pattern, text, re.IGNORECASE | re.DOTALL)
+                        if match:
+                            xml_str = match.group(0)
+                        else:
+                            return None
+                
+                return self._parse_tool_command(xml_str)
+            except Exception as e:
+                print(f"Error parsing XML: {str(e)}")
+                return None
         
         # Check for raw command pattern
         if re.search(r'curl\s+.*https?://', text, re.IGNORECASE):
@@ -265,8 +310,131 @@ class McpCurl(MCPTool):
         
         return None
     
+    def _parse_tool_command(self, xml_str: str) -> Optional[Dict[str, Any]]:
+        """Parse an XML tool command and extract parameters."""
+        try:
+            root = ET.fromstring(xml_str)
+            
+            # Validate the tool name
+            tool_name = root.find('name')
+            if tool_name is None or tool_name.text.lower() != 'curl':
+                return None
+                
+            # Extract and validate parameters
+            params = {"command": "raw", "target": ""}
+            params_elem = root.find('parameters')
+            if params_elem is not None:
+                # Extract target
+                target_elem = params_elem.find('target')
+                if target_elem is not None and target_elem.text:
+                    params["target"] = target_elem.text.strip()
+                
+                # Extract raw_command
+                raw_command_elem = params_elem.find('raw_command')
+                if raw_command_elem is not None and raw_command_elem.text:
+                    params["raw_command"] = raw_command_elem.text.strip()
+                
+                # Extract command_id
+                command_id_elem = params_elem.find('command_id')
+                if command_id_elem is not None and command_id_elem.text:
+                    try:
+                        params["command_id"] = int(command_id_elem.text.strip())
+                        params["command"] = "predefined"
+                    except ValueError:
+                        pass
+                
+                # Extract timeout
+                timeout_elem = params_elem.find('timeout')
+                if timeout_elem is not None and timeout_elem.text:
+                    try:
+                        params["timeout"] = float(timeout_elem.text.strip())
+                    except ValueError:
+                        pass
+                
+                # Extract data
+                data_elem = params_elem.find('data')
+                if data_elem is not None and data_elem.text:
+                    params["data"] = data_elem.text.strip()
+                
+                # Extract auth
+                auth_elem = params_elem.find('auth')
+                if auth_elem is not None and auth_elem.text:
+                    params["auth"] = auth_elem.text.strip()
+                
+                # If we have a target, return the params
+                if params["target"]:
+                    return params
+                        
+            return None
+                        
+        except Exception as e:
+            print(f"Error parsing XML: {str(e)}")
+            return None
+    
     def _extract_url(self, text: str) -> str:
         """Extract URL from text."""
         url_pattern = r'https?://[^\s]+'
         match = re.search(url_pattern, text)
         return match.group(0) if match else ""
+    
+    def _save_curl_result(self, target: str, result: str):
+        """Save curl result to a file in the results/curl/ directory."""
+        try:
+            # Create a safe filename from the target URL
+            safe_target = re.sub(r'[^\w\s-]', '', target).strip()
+            safe_target = re.sub(r'[-\s]+', '-', safe_target)
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"curl_{timestamp}_{safe_target[:50]}.txt"
+            filepath = os.path.join(self.curl_results_dir, filename)
+            
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(f"Tool: Curl\n")
+                f.write(f"Target: {target}\n")
+                f.write(f"Timestamp: {datetime.datetime.now().isoformat()}\n")
+                f.write("=" * 50 + "\n\n")
+                f.write(result)
+            
+            print(f"Curl result saved to: {filepath}")
+        except Exception as e:
+            print(f"Error saving curl result: {str(e)}")
+    
+    def get_system_prompt(self) -> str:
+        """Return the system prompt for this tool."""
+        return (
+            f"You have access to {self.name}. {self.description} "
+            "When you need to execute curl commands, use the following XML format:\n"
+            "```xml\n"
+            "<tool>\n"
+            "  <name>curl</name>\n"
+            "  <parameters>\n"
+            "    <command>raw</command>\n"
+            "    <raw_command>curl -I</raw_command>\n"
+            "    <target>https://example.com</target>\n"
+            "    <timeout>30</timeout>\n"
+            "  </parameters>\n"
+            "</tool>\n"
+            "```\n\n"
+            "Alternatively, you can use predefined commands:\n"
+            "```xml\n"
+            "<tool>\n"
+            "  <name>curl</name>\n"
+            "  <parameters>\n"
+            "    <command>predefined</command>\n"
+            "    <command_id>2</command_id>\n"
+            "    <target>https://example.com</target>\n"
+            "  </parameters>\n"
+            "</tool>\n"
+            "```\n\n"
+            "Available predefined commands:\n"
+            "1. Basic GET: curl {target}\n"
+            "2. Headers Only: curl -I {target}\n"
+            "3. Follow Redirects: curl -L {target}\n"
+            "4. Verbose Output: curl -v {target}\n"
+            "5. POST Request: curl -X POST -d '{data}' {target}\n"
+            "6. With Headers: curl -H 'Content-Type: application/json' {target}\n"
+            "7. With Authentication: curl -u 'user:pass' {target}\n"
+            "8. Save to File: curl -o output.txt {target}\n\n"
+            "Only use this format when you actually want to execute the tool. "
+            "The curl results will be automatically executed and provided back to you. "
+            "All results are saved to the results/curl/ directory for later reference."
+        )

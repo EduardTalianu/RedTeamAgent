@@ -3,11 +3,14 @@ import requests
 import json
 import re
 import xml.etree.ElementTree as ET
+import os
+import time
+import datetime
 from typing import Dict, Any, List, Optional, Tuple
 from mcp_base import MCPTool
 
 class McpWebsearch(MCPTool):
-    """MCP-compliant web search tool with XML parsing support."""
+    """MCP-compliant web search tool with XML parsing support and results saving."""
     
     def __init__(self):
         super().__init__()
@@ -22,6 +25,10 @@ class McpWebsearch(MCPTool):
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15',
             'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.96 Safari/537.36'
         ]
+        # Create results directory structure
+        self.results_dir = "results"
+        self.websearch_results_dir = os.path.join(self.results_dir, "websearch")
+        os.makedirs(self.websearch_results_dir, exist_ok=True)
     
     def get_description(self) -> str:
         return "Search the web for information using various search engines."
@@ -171,13 +178,18 @@ class McpWebsearch(MCPTool):
         self.last_query = query
         
         if engine == "duckduckgo":
-            return self._search_duckduckgo(query, num_results)
+            result = self._search_duckduckgo(query, num_results)
         elif engine == "google":
-            return self._search_google(query, num_results, region)
+            result = self._search_google(query, num_results, region)
         elif engine == "bing":
-            return self._search_bing(query, num_results, region)
+            result = self._search_bing(query, num_results, region)
         else:
             return f"Unsupported search engine: {engine}"
+        
+        # Save results to file
+        self._save_results(query, result)
+        
+        return result
     
     def _search_duckduckgo(self, query: str, num_results: int) -> str:
         """Search using DuckDuckGo HTML scraping (no API key needed)."""
@@ -306,6 +318,27 @@ class McpWebsearch(MCPTool):
             lines.append(f"   URL: {r.get('url', '')}\n\n")
         return "\n".join(lines)
     
+    def _save_results(self, query: str, result: str):
+        """Save results to a file in the results/websearch directory."""
+        try:
+            # Create a safe filename from the query
+            safe_query = re.sub(r'[^\w\s-]', '', query).strip()
+            safe_query = re.sub(r'[-\s]+', '-', safe_query)
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"websearch_{timestamp}_{safe_query[:50]}.txt"
+            filepath = os.path.join(self.websearch_results_dir, filename)
+            
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(f"Tool: Web Search\n")
+                f.write(f"Query: {query}\n")
+                f.write(f"Timestamp: {datetime.datetime.now().isoformat()}\n")
+                f.write("=" * 50 + "\n\n")
+                f.write(result)
+            
+            print(f"Websearch results saved to: {filepath}")
+        except Exception as e:
+            print(f"Error saving websearch results: {str(e)}")
+    
     def get_system_prompt(self) -> str:
         """Return the system prompt for this tool."""
         return (
@@ -345,5 +378,6 @@ class McpWebsearch(MCPTool):
             "The tool will return a formatted list of search results with titles, snippets, and URLs. "
             "You can then use this information to answer the user's question. "
             "Be specific with your search queries to get the most relevant results. "
-            "Note: The tool uses DuckDuckGo by default which doesn't require an API key."
+            "Note: The tool uses DuckDuckGo by default which doesn't require an API key. "
+            "All results are saved to the results/websearch/ directory for later reference."
         )
