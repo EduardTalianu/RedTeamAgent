@@ -3,12 +3,9 @@ import sys
 import os
 import xml.etree.ElementTree as ET
 from typing import Dict, Any, List, Optional, Tuple
-
 # Add current directory to path to import mcp_base
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 from mcp_base import MCPTool
-
 # Add parent directory to path to import agents
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -20,6 +17,8 @@ class McpAgentCreator(MCPTool):
         self.task_orchestrator = task_orchestrator
         self.tools = tools  # Store the tools dictionary
         self.friendly_name = "Agent Creator"
+        # Get the orchestrator's model if available
+        self.orchestrator_model = getattr(task_orchestrator, 'current_model', None) if task_orchestrator else None
     
     def get_description(self) -> str:
         return "Create specialized agents to perform tasks in the task orchestrator."
@@ -64,41 +63,49 @@ class McpAgentCreator(MCPTool):
     def execute(self, params: Dict[str, Any]) -> str:
         """Execute agent creation."""
         agent_xml = params.get("agent_xml", "")
-        
         if not agent_xml:
             return "Error: No agent XML provided"
-        
         try:
-            # Parse the XML
             root = ET.fromstring(agent_xml)
-            
-            agent_type = root.findtext('type')
-            name = root.findtext('name')
-            description = root.findtext('description')
-            
+            agent_type   = root.findtext('type')
+            name         = root.findtext('name')
+            description  = root.findtext('description')
+            # NEW: optional orchestrator context
+            orch_prompt  = root.findtext('orchestrator_prompt') or ""
             parameters = {}
             params_elem = root.find('parameters')
             if params_elem is not None:
                 for param in params_elem:
                     parameters[param.tag] = param.text
-            
-            # Create the generic agent
-            agent = self._create_agent(agent_type, name, description, parameters)
-            
+            agent = self._create_agent(
+                agent_type,
+                name,
+                description,
+                parameters,
+                orchestrator_prompt=orch_prompt
+            )
             if agent:
-                # Execute the agent
                 agent.execute()
-                
                 return f"Agent '{name}' created and executed successfully. Agent ID: {agent.id}"
             else:
                 return f"Error: Failed to create agent of type '{agent_type}'"
-                
         except ET.ParseError as e:
             return f"Error parsing agent XML: {str(e)}"
         except Exception as e:
+            # Print the full exception for debugging
+            import traceback
+            print(f"DEBUG: Exception in agent creation: {str(e)}")
+            print(f"DEBUG: Traceback: {traceback.format_exc()}")
             return f"Error creating agent: {str(e)}"
     
-    def _create_agent(self, agent_type: str, name: str, description: str, parameters: Dict[str, Any]):
+    def _create_agent(
+        self,
+        agent_type: str,
+        name: str,
+        description: str,
+        parameters: Dict[str, Any],
+        **kwargs
+    ) -> Optional["GenericAgent"]:
         """Create a generic agent of the specified type."""
         if not self.task_orchestrator:
             raise Exception("Task orchestrator not available")
@@ -109,14 +116,19 @@ class McpAgentCreator(MCPTool):
         # Import the GenericAgent class
         from agents.task_agents import GenericAgent
         
-        # Create the generic agent
+        # Create the generic agent with the orchestrator's model
         agent = GenericAgent(
             task_type=agent_type,
             task_params=parameters,
             tools=self.tools,
             name=name,
             description=description,
-            trm=self.task_orchestrator.trm
+            trm=self.task_orchestrator.trm,
+            # NEW: give the agent its initial prompt / context
+            orchestrator_prompt=kwargs.get("orchestrator_prompt", ""),
+            server_url="http://127.0.0.1:11436",
+            # NEW: pass the orchestrator's model
+            orchestrator_model=self.orchestrator_model
         )
         
         # Add to task orchestrator
@@ -125,7 +137,6 @@ class McpAgentCreator(MCPTool):
         return agent
     
     def get_system_prompt(self) -> str:
-        """Return the system prompt for this tool."""
         return (
             f"You have access to {self.name}. {self.description} "
             "When you need to create a specialized agent to perform a task, use the following XML format:\n"
@@ -144,7 +155,8 @@ class McpAgentCreator(MCPTool):
             "  </parameters>\n"
             "</agent>\n"
             "```\n\n"
-            "IMPORTANT: The agents you create will use the available MCP tools to perform their tasks. "
+            "IMPORTANT: The agents you create will use the same model as the orchestrator to ensure consistency. "
+            "For Groq, please use 'groq-gemma2-9b-it'. "
             "For example, a web_search agent will use the MCP web search tool, and a data_analysis agent "
             "with analysis_type=dns will use the MCP curl tool for DNS lookups.\n\n"
             "Create only ONE agent at a time. Wait for the agent to complete before creating another agent.\n\n"

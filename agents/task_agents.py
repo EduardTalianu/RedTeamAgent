@@ -6,6 +6,7 @@ import threading
 import time
 import os
 import json
+import requests
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, Callable
 from datetime import datetime
@@ -131,50 +132,262 @@ class BaseAgent(Node):
         """Abstract method to be implemented by specific agents."""
         pass
 
+# ------------------------------------------------------------------
+#  GenericAgent – now with *private* memory per agent
+# ------------------------------------------------------------------
 class GenericAgent(BaseAgent):
-    """Generic agent that executes tasks using MCP tools with proper MCP command formatting."""
-    
-    def __init__(self, task_type: str, task_params: Dict[str, Any], tools: Dict[str, Any], 
-                 name: str = None, description: str = None, trm: TaskRelationManager = None):
-        # Set default name and description if not provided
+    """
+    Generic agent that executes tasks using MCP tools with proper MCP command formatting.
+    Each instance carries its OWN conversation history (isolated context).
+    """
+
+    def __init__(
+        self,
+        task_type: str,
+        task_params: Dict[str, Any],
+        tools: Dict[str, Any],
+        name: str = None,
+        description: str = None,
+        trm: TaskRelationManager = None,
+        orchestrator_prompt: str = "",
+        server_url: str = "http://127.0.0.1:11436",
+        orchestrator_model: str = None  # NEW: Pass the orchestrator's model
+    ):
+        # --- defaults -------------------------------------------------
         if name is None:
             name = f"{task_type.replace('_', ' ').title()} Agent"
         if description is None:
             description = f"Agent to perform {task_type} task"
-            
+        # --- base init -------------------------------------------------
         super().__init__(name=name, description=description, trm=trm)
         self.task_type = task_type
         self.task_params = task_params
         self.tools = tools
+        self.server_url = server_url
+        # --- per-agent memory -----------------------------------------
+        self.history: List[Dict[str, str]] = []
+        self.orchestrator_prompt = orchestrator_prompt
+        # --- Use orchestrator's model if provided --------------------
+        self.orchestrator_model = orchestrator_model
+
+    # ================================================================
+    #  MAIN ENTRY – now starts a *private* chat loop
+    # ================================================================
+    def _execute_task(self, **kwargs) -> Dict[str, Any]:
+        # 1.  Seed isolated history
+        self.history = [
+            {"role": "system", "content": self._build_agent_system_prompt()},
+            {"role": "user",   "content": self.orchestrator_prompt or "Please perform your assigned task."}
+        ]
+
+        # 2.  Run the agent's own LLM loop
+        final_answer = self._agent_chat_loop()
+
+        # 3.  Return only the distilled result to the orchestrator
+        return {
+            "task_type": self.task_type,
+            "agent_name": self.name,
+            "final_answer": final_answer,
+            "agent_history_length": len(self.history)
+        }
+
+    # ----------------------------------------------------------------
+    #  Private helpers
+    # ----------------------------------------------------------------
+    def _build_agent_system_prompt(self) -> str:
+        return (
+            f"You are a specialised agent: {self.name}\n"
+            f"Description: {self.description}\n"
+            f"Task type: {self.task_type}\n"
+            f"Parameters: {self.task_params}\n\n"
+            "Carry out the task step-by-step. "
+            "You may use any tools available to you. "
+            "When you are finished, return ONLY the final answer or summary."
+        )
+
+    def _pick_model(self) -> str:
+        # Use the orchestrator's model if available, otherwise fall back to default
+        if self.orchestrator_model:
+            return self.orchestrator_model
+        
+        # Use a valid default model instead of the decommissioned one
+        return self.task_params.get("model", "groq-gemma2-9b-it")
+
+    # ================================================================
+    #  AGENT-CHAT-LOOP  (mirrors ChatTab but isolated)
+    # ================================================================
+    def _agent_chat_loop(self) -> str:
+        """
+        Keep chatting with the LLM (and tools) until the agent decides it is done.
+        Returns the final textual answer.
+        """
+        # Check server health before starting
+        if not self._check_server_health():
+            raise Exception("API server is not healthy or not running")
+        
+        while True:
+            # ---- send current private history -----------------------
+            payload = {
+                "model": self._pick_model(),
+                "messages": self.history,
+                "temperature": 0.7,
+                "max_tokens": 1500,
+                "stream": False
+            }
+            
+            # Debug: Print the payload
+            print(f"DEBUG: Sending payload to API: {json.dumps(payload, indent=2)}")
+            
+            # Retry mechanism
+            max_retries = 3
+            retry_delay = 1  # seconds
+            
+            for attempt in range(max_retries):
+                try:
+                    resp = requests.post(
+                        f"{self.server_url}/api/chat", 
+                        json=payload, 
+                        timeout=60,
+                        headers={"Content-Type": "application/json"}
+                    )
+                    
+                    # Debug: Print the response status and content
+                    print(f"DEBUG: Response status: {resp.status_code}")
+                    print(f"DEBUG: Response headers: {dict(resp.headers)}")
+                    
+                    # Print the first 1000 characters of the response content
+                    response_text = resp.text
+                    print(f"DEBUG: Response content (first 1000 chars): {response_text[:1000]}")
+                    
+                    # If status code is not 200, print more detailed error information
+                    if resp.status_code != 200:
+                        print(f"DEBUG: Full response content: {response_text}")
+                        if attempt < max_retries - 1:
+                            print(f"DEBUG: Retrying in {retry_delay} seconds...")
+                            time.sleep(retry_delay)
+                            retry_delay *= 2  # Exponential backoff
+                            continue
+                        else:
+                            raise Exception(f"API returned status {resp.status_code}: {response_text}")
+                    
+                    # Parse the JSON response
+                    try:
+                        response_data = resp.json()
+                        print(f"DEBUG: Parsed JSON keys: {list(response_data.keys())}")
+                    except json.JSONDecodeError as e:
+                        print(f"DEBUG: JSON decode error: {str(e)}")
+                        print(f"DEBUG: Response text was: {response_text}")
+                        raise Exception(f"Failed to decode JSON response: {str(e)}")
+                    
+                    # Try to extract the response content in different possible formats
+                    ai_reply = None
+                    
+                    # Format 1: OpenAI-style with "choices"
+                    if "choices" in response_data and len(response_data["choices"]) > 0:
+                        choice = response_data["choices"][0]
+                        if "message" in choice and "content" in choice["message"]:
+                            ai_reply = choice["message"]["content"]
+                        elif "text" in choice:
+                            ai_reply = choice["text"]
+                        elif "delta" in choice and "content" in choice["delta"]:
+                            ai_reply = choice["delta"]["content"]
+                    
+                    # Format 2: Direct "message" field
+                    elif "message" in response_data:
+                        message = response_data["message"]
+                        if isinstance(message, str):
+                            ai_reply = message
+                        elif isinstance(message, dict) and "content" in message:
+                            ai_reply = message["content"]
+                    
+                    # Format 3: Direct "content" field
+                    elif "content" in response_data:
+                        ai_reply = response_data["content"]
+                    
+                    # Format 4: Direct "text" field
+                    elif "text" in response_data:
+                        ai_reply = response_data["text"]
+                    
+                    # Format 5: Direct "response" field
+                    elif "response" in response_data:
+                        ai_reply = response_data["response"]
+                    
+                    # Format 6: Direct "answer" field
+                    elif "answer" in response_data:
+                        ai_reply = response_data["answer"]
+                    
+                    # If we still don't have a reply, look for any string field
+                    if ai_reply is None:
+                        for key, value in response_data.items():
+                            if isinstance(value, str) and len(value) > 10:  # Assume longer strings are more likely to be the response
+                                ai_reply = value
+                                print(f"DEBUG: Using field '{key}' as response content")
+                                break
+                    
+                    if ai_reply is None:
+                        print(f"DEBUG: Could not extract response from: {response_data}")
+                        raise Exception(f"Could not extract response from API: {response_data}")
+                    
+                    print(f"DEBUG: Extracted response: {ai_reply[:100]}...")
+                    
+                    self.history.append({"role": "assistant", "content": ai_reply})
+
+                    # ---- tool-use detection ---------------------------------
+                    # Build a tiny registry on the fly (tools already injected)
+                    tool_used = False
+                    for tool_name, tool in self.tools.items():
+                        if not tool.enabled:
+                            continue
+                        cmd = tool.detect_request(ai_reply)
+                        if cmd:
+                            tool_used = True
+                            tool_out = tool.execute(cmd)
+                            # Truncate oversized returns
+                            if len(tool_out) > 2000:
+                                tool_out = tool_out[:2000] + "\n[truncated]"
+                            self.history.append({"role": "system", "content": f"Tool result:\n{tool_out}"})
+                            break
+
+                    if not tool_used:           # Natural stop – no more tools requested
+                        return ai_reply
+                        
+                except requests.exceptions.RequestException as e:
+                    print(f"DEBUG: Request exception: {str(e)}")
+                    if attempt < max_retries - 1:
+                        print(f"DEBUG: Retrying in {retry_delay} seconds...")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                    else:
+                        raise Exception(f"Connection to API server failed: {str(e)}")
+                except Exception as e:
+                    print(f"DEBUG: General exception: {str(e)}")
+                    raise Exception(f"Error in agent chat loop: {str(e)}")
+
+    def _check_server_health(self):
+        """Check if the server is healthy."""
+        try:
+            resp = requests.get(f"{self.server_url}/health", timeout=5)
+            return resp.status_code == 200
+        except:
+            return False
     
+    # ----------------------------------------------------------------
+    #  Legacy file-saving helper (unchanged behaviour)
+    # ----------------------------------------------------------------
     def _save_results_to_file(self, result: Dict[str, Any]) -> str:
-        """Save agent results to a file."""
-        # Create results directory if it doesn't exist
         results_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "results", "agents")
         os.makedirs(results_dir, exist_ok=True)
-        
-        # Create a filename with agent ID and timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"agent_{self.id}_{timestamp}.json"
         filepath = os.path.join(results_dir, filename)
-        
-        # Convert timestamps to ISO format strings if they exist
-        start_time_str = None
-        end_time_str = None
-        
+
+        start_str = None
+        end_str   = None
         if self.start_time:
-            if isinstance(self.start_time, float):
-                start_time_str = datetime.fromtimestamp(self.start_time).isoformat()
-            else:
-                start_time_str = self.start_time.isoformat() if hasattr(self.start_time, 'isoformat') else str(self.start_time)
-        
+            start_str = datetime.fromtimestamp(self.start_time).isoformat()
         if self.end_time:
-            if isinstance(self.end_time, float):
-                end_time_str = datetime.fromtimestamp(self.end_time).isoformat()
-            else:
-                end_time_str = self.end_time.isoformat() if hasattr(self.end_time, 'isoformat') else str(self.end_time)
-        
-        # Prepare data to save
+            end_str   = datetime.fromtimestamp(self.end_time).isoformat()
+
         data_to_save = {
             "agent_id": self.id,
             "agent_name": self.name,
@@ -183,361 +396,12 @@ class GenericAgent(BaseAgent):
             "task_params": self.task_params,
             "status": self.status,
             "progress": self.progress,
-            "start_time": start_time_str,
-            "end_time": end_time_str,
+            "start_time": start_str,
+            "end_time": end_str,
             "execution_time": self.get_execution_time(),
-            "result": result
+            "result": result,
+            "agent_history": self.history          # NEW: full private context saved
         }
-        
-        # Save to file
-        with open(filepath, 'w', encoding='utf-8') as f:
+        with open(filepath, "w", encoding="utf-8") as f:
             json.dump(data_to_save, f, indent=2, ensure_ascii=False)
-        
         return filepath
-    
-    def _execute_task(self, **kwargs) -> Dict[str, Any]:
-        """Execute the task using appropriate MCP tools with proper command formatting."""
-        try:
-            # Update progress to 10%
-            self.progress = 10
-            
-            # Execute the task based on type
-            if self.task_type == "web_search":
-                result = self._execute_web_search()
-            elif self.task_type == "data_analysis":
-                result = self._execute_data_analysis()
-            elif self.task_type == "content_creation":
-                result = self._execute_content_creation()
-            elif self.task_type == "calculation":
-                result = self._execute_calculation()
-            else:
-                raise TaskImpossibleException(f"Unknown task type: {self.task_type}")
-            
-            # Save results to file
-            result_file = self._save_results_to_file(result)
-            result["result_file"] = result_file
-            
-            # Update progress to 100%
-            self.progress = 100
-            return result
-            
-        except Exception as e:
-            # Save error to file
-            error_result = {"error": str(e)}
-            try:
-                error_file = self._save_results_to_file(error_result)
-                error_result["result_file"] = error_file
-            except:
-                pass  # Continue even if saving fails
-            
-            raise TaskImpossibleException(f"Error executing task: {str(e)}")
-    
-    def _execute_web_search(self) -> Dict[str, Any]:
-        """Execute web search using MCP web search tool with proper MCP format."""
-        query = self.task_params.get("query", "")
-        
-        # Update progress to 30%
-        self.progress = 30
-        
-        # Use MCP web search tool if available
-        if "mcp_websearch" in self.tools and self.tools["mcp_websearch"].enabled:
-            try:
-                tool = self.tools["mcp_websearch"]
-                
-                # Perform multiple searches with different terms for comprehensive results
-                search_queries = [
-                    {"query": query, "engine": "duckduckgo", "num_results": 5},
-                    {"query": query + " about", "engine": "duckduckgo", "num_results": 3},
-                    {"query": query + " services", "engine": "duckduckgo", "num_results": 3}
-                ]
-                
-                all_results = []
-                
-                for i, search_params in enumerate(search_queries):
-                    # Update progress
-                    self.progress = 30 + (i * 20)
-                    
-                    # Execute search using proper MCP format
-                    result = tool.execute(search_params)
-                    
-                    # Parse the result - it should be a formatted string
-                    if isinstance(result, str):
-                        # Extract results from the formatted string
-                        lines = result.split('\n')
-                        current_result = {}
-                        in_result = False
-                        
-                        for line in lines:
-                            line = line.strip()
-                            if line.startswith(('1.', '2.', '3.', '4.', '5.')):
-                                if current_result and 'title' in current_result:
-                                    all_results.append(current_result)
-                                current_result = {'title': line[2:].strip(), 'url': '', 'snippet': ''}
-                                in_result = True
-                            elif line.startswith('URL:') and in_result:
-                                current_result['url'] = line[4:].strip()
-                            elif in_result and not line.startswith(('URL:', 'Web Search Results')):
-                                if line and not line.startswith(('1.', '2.', '3.', '4.', '5.')):
-                                    current_result['snippet'] += line + ' '
-                        
-                        # Add the last result
-                        if current_result and 'title' in current_result:
-                            all_results.append(current_result)
-                
-                # Remove duplicates
-                unique_results = []
-                seen_urls = set()
-                for result in all_results:
-                    if result.get('url') and result['url'] not in seen_urls:
-                        unique_results.append(result)
-                        seen_urls.add(result['url'])
-                    elif not result.get('url'):  # Keep results without URLs
-                        unique_results.append(result)
-                
-                # Update progress to 90%
-                self.progress = 90
-                
-                return {
-                    "task_type": "web_search",
-                    "query": query,
-                    "search_queries_used": search_queries,
-                    "results": unique_results,
-                    "count": len(unique_results),
-                    "conclusions": [
-                        f"Found {len(unique_results)} unique results for {query}",
-                        "Search covered multiple aspects including main site, about pages, and services",
-                        "Results provide a comprehensive overview of the target domain"
-                    ]
-                }
-                
-            except Exception as e:
-                raise TaskImpossibleException(f"Web search failed: {str(e)}")
-        else:
-            # Fallback to simulated search if MCP tool is not available
-            time.sleep(2)
-            
-            # Simulate more detailed search results
-            results = [
-                {"title": f"Main page for {query}", "url": f"https://{query.replace('site:', '').strip()}", "snippet": "Official website with information about services and products."},
-                {"title": f"About {query}", "url": f"https://{query.replace('site:', '').strip()}/about", "snippet": "Company history, mission, and values."},
-                {"title": f"Contact {query}", "url": f"https://{query.replace('site:', '').strip()}/contact", "snippet": "Contact information and locations."},
-                {"title": f"Services offered", "url": f"https://{query.replace('site:', '').strip()}/services", "snippet": "Detailed information about products and services."},
-                {"title": f"News and updates", "url": f"https://{query.replace('site:', '').strip()}/news", "snippet": "Latest news and updates."}
-            ]
-            
-            return {
-                "task_type": "web_search",
-                "query": query,
-                "search_queries_used": [query],
-                "results": results,
-                "count": len(results),
-                "note": "Simulated results (MCP web search tool not available)",
-                "conclusions": [
-                    f"Found {len(results)} simulated results for {query}",
-                    "Search covered main pages including about, contact, services, and news",
-                    "Results provide a comprehensive overview of the target domain structure"
-                ]
-            }
-    
-    def _execute_data_analysis(self) -> Dict[str, Any]:
-        """Execute data analysis using MCP tools with proper DNS commands following MCP format."""
-        data = self.task_params.get("data", "")
-        analysis_type = self.task_params.get("analysis_type", "")
-        
-        # Update progress to 30%
-        self.progress = 30
-        
-        if analysis_type == "dns":
-            # Use MCP curl tool for DNS analysis with proper MCP format
-            if "mcp_curl" in self.tools and self.tools["mcp_curl"].enabled:
-                try:
-                    tool = self.tools["mcp_curl"]
-                    
-                    # Perform multiple DNS-related queries using curl with proper MCP command format
-                    dns_commands = [
-                        {
-                            "command": "raw",
-                            "raw_command": f"nslookup {data}",
-                            "target": data,
-                            "timeout": 30
-                        },
-                        {
-                            "command": "raw", 
-                            "raw_command": f"nslookup -type=MX {data}",
-                            "target": data,
-                            "timeout": 30
-                        },
-                        {
-                            "command": "raw",
-                            "raw_command": f"nslookup -type=NS {data}",
-                            "target": data, 
-                            "timeout": 30
-                        },
-                        {
-                            "command": "raw",
-                            "raw_command": f"nslookup www.{data}",
-                            "target": f"www.{data}",
-                            "timeout": 30
-                        }
-                    ]
-                    
-                    all_results = {}
-                    
-                    for i, dns_cmd in enumerate(dns_commands):
-                        # Update progress
-                        self.progress = 30 + (i * 15)
-                        
-                        # Execute DNS query using MCP curl tool with proper format
-                        result = tool.execute(dns_cmd)
-                        command_description = dns_cmd["raw_command"]
-                        all_results[command_description] = result
-                    
-                    # Update progress to 90%
-                    self.progress = 90
-                    
-                    return {
-                        "task_type": "data_analysis",
-                        "analysis_type": analysis_type,
-                        "data": data,
-                        "commands_executed": dns_commands,
-                        "results": all_results,
-                        "conclusions": [
-                            f"Performed comprehensive DNS analysis for {data}",
-                            "Analyzed A records, MX records, NS records, and www subdomain",
-                            "Results provide complete DNS infrastructure overview"
-                        ]
-                    }
-                    
-                except Exception as e:
-                    raise TaskImpossibleException(f"DNS analysis failed: {str(e)}")
-            else:
-                # Fallback to simulated analysis
-                time.sleep(3)
-                
-                return {
-                    "task_type": "data_analysis",
-                    "analysis_type": analysis_type,
-                    "data": data,
-                    "commands_executed": [
-                        {"command": f"nslookup {data}"},
-                        {"command": f"nslookup -type=MX {data}"},
-                        {"command": f"nslookup www.{data}"}
-                    ],
-                    "results": {
-                        f"nslookup {data}": f"A record: 192.0.2.1 for {data}",
-                        f"nslookup -type=MX {data}": f"MX record: mail.{data}",
-                        f"nslookup www.{data}": f"CNAME record: www.{data} -> {data}"
-                    },
-                    "conclusions": [
-                        f"Performed simulated DNS analysis for {data}",
-                        "Identified A records for main domain",
-                        "Found MX record for mail handling",
-                        "CNAME record indicates www subdomain configuration"
-                    ],
-                    "note": "Simulated results (MCP curl tool not available)"
-                }
-        else:
-            # For other analysis types, simulate more thorough work
-            time.sleep(3)
-            
-            return {
-                "task_type": "data_analysis",
-                "analysis_type": analysis_type,
-                "data": data,
-                "analysis_performed": [
-                    "Basic information extraction",
-                    "Pattern recognition", 
-                    "Statistical analysis",
-                    "Comparative analysis with similar data"
-                ],
-                "summary": f"Comprehensive analysis completed for {type(data).__name__}",
-                "insights": [
-                    "Primary insight: The data shows consistent patterns",
-                    "Secondary insight: There are notable outliers that warrant further investigation", 
-                    "Tertiary insight: The data correlates with expected benchmarks"
-                ],
-                "recommendations": [
-                    "Consider investigating the outliers further",
-                    "The patterns suggest potential for optimization",
-                    "Additional data collection may improve accuracy"
-                ],
-                "conclusions": [
-                    f"Completed comprehensive {analysis_type} analysis for {data}",
-                    "Analysis included multiple approaches: pattern recognition, statistical analysis, and comparative analysis",
-                    "Identified key insights and actionable recommendations based on the findings"
-                ],
-                "note": "Simulated results (analysis type not supported by MCP tools)"
-            }
-    
-    def _execute_content_creation(self) -> Dict[str, Any]:
-        """Execute content creation using MCP tools with proper MCP format."""
-        content_type = self.task_params.get("content_type", "")
-        topic = self.task_params.get("topic", "")
-        
-        # Update progress to 30%
-        self.progress = 30
-        
-        # Use MCP web search tool for research if available
-        research_results = None
-        if "mcp_websearch" in self.tools and self.tools["mcp_websearch"].enabled:
-            try:
-                tool = self.tools["mcp_websearch"]
-                # Use proper MCP format for web search
-                research_params = {"query": topic, "engine": "duckduckgo", "num_results": 3}
-                research_results = tool.execute(research_params)
-                
-                # Update progress to 50%
-                self.progress = 50
-            except Exception as e:
-                print(f"Research failed: {str(e)}")
-        
-        # Simulate content creation
-        time.sleep(1)
-        
-        content = f"This is a sample {content_type} about {topic}."
-        if research_results:
-            content += " Created using research from web search results."
-        
-        # Update progress to 100%
-        self.progress = 100
-        
-        return {
-            "task_type": "content_creation",
-            "content_type": content_type,
-            "topic": topic,
-            "content": content,
-            "research": research_results,
-            "word_count": len(content.split()),
-            "conclusions": [
-                f"Successfully created {content_type} about {topic}",
-                f"Content is {len(content.split())} words in length",
-                "Research was incorporated into the content creation process" if research_results else "Content created without external research"
-            ]
-        }
-    
-    def _execute_calculation(self) -> Dict[str, Any]:
-        """Execute calculation task."""
-        expression = self.task_params.get("expression", "")
-        
-        # Update progress to 50%
-        self.progress = 50
-        
-        try:
-            # Simple evaluation (be careful with eval in production!)
-            result = eval(expression)
-            
-            # Update progress to 100%
-            self.progress = 100
-            
-            return {
-                "task_type": "calculation", 
-                "expression": expression,
-                "result": result,
-                "conclusions": [
-                    f"Successfully calculated the result of {expression}",
-                    f"The result is {result}",
-                    "Calculation was performed without errors"
-                ]
-            }
-        except Exception as e:
-            raise TaskImpossibleException(f"Cannot calculate expression: {e}")

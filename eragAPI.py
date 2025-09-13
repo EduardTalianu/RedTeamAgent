@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-EragAPI - Unified AI Service with proper SSE streaming support
+EragAPI - Unified AI Service with proper SSE streaming support and request-scoped clients
 """
 
 # Standard library imports
@@ -31,6 +31,14 @@ from openai import OpenAI
 load_dotenv()
 
 class BaseClient:
+    def __init__(self, model=None):
+        self.model = model or self.default_model()
+        self._validate_environment()
+    
+    def _validate_environment(self):
+        """Validate that required environment variables are set."""
+        pass
+    
     def chat(self, messages, temperature, max_tokens, stream):
         raise NotImplementedError
     
@@ -39,9 +47,15 @@ class BaseClient:
 
 class GroqClient(BaseClient):
     def __init__(self, model="mixtral-8x7b-32768"):
-        self.client = Groq(api_key=os.getenv("GROQ_API_KEY"))
         self.model = model
-
+        self._validate_environment()
+        
+    def _validate_environment(self):
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            raise ValueError("GROQ_API_KEY environment variable is required but not set")
+        self.client = Groq(api_key=api_key)
+    
     def chat(self, messages, temperature=0.7, max_tokens=None, stream=False):
         completion = self.client.chat.completions.create(
             model=self.model,
@@ -64,9 +78,16 @@ class GroqClient(BaseClient):
 
 class GeminiClient(BaseClient):
     def __init__(self, model="gemini-pro"):
-        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+        self.model = model
+        self._validate_environment()
+        
+    def _validate_environment(self):
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY environment variable is required but not set")
+        genai.configure(api_key=api_key)
         self.model = genai.GenerativeModel(model)
-
+    
     def chat(self, messages, temperature=0.7, max_tokens=None, stream=False):
         # Convert "assistant" role to "model" which Gemini expects
         formatted = [{"role": "model" if m["role"] == "assistant" else "user", 
@@ -94,10 +115,15 @@ class GeminiClient(BaseClient):
 
 class CohereClient(BaseClient):
     def __init__(self, model="command"):
-        # Use ClientV2 instead of Client for v2 API
-        self.client = cohere.ClientV2(api_key=os.getenv("CO_API_KEY"))
         self.model = model
-
+        self._validate_environment()
+        
+    def _validate_environment(self):
+        api_key = os.getenv("CO_API_KEY")
+        if not api_key:
+            raise ValueError("CO_API_KEY environment variable is required but not set")
+        self.client = cohere.ClientV2(api_key=api_key)
+    
     def chat(self, messages, temperature=0.7, max_tokens=None, stream=False):
         # Convert messages to v2 format
         formatted_messages = []
@@ -147,15 +173,21 @@ class CohereClient(BaseClient):
                 max_tokens=max_tokens
             )
             return response.message.content[0].text
-        
+
 class DeepSeekClient(BaseClient):
     def __init__(self, model="deepseek-chat"):
+        self.model = model
+        self._validate_environment()
+        
+    def _validate_environment(self):
+        api_key = os.getenv("DEEPSEEK_API_KEY")
+        if not api_key:
+            raise ValueError("DEEPSEEK_API_KEY environment variable is required but not set")
         self.client = OpenAI(
             base_url="https://api.deepseek.com/v1",
-            api_key=os.getenv("DEEPSEEK_API_KEY")
+            api_key=api_key
         )
-        self.model = model
-
+    
     def chat(self, messages, temperature=0.7, max_tokens=None, stream=False):
         response = self.client.chat.completions.create(
             model=self.model,
@@ -171,17 +203,18 @@ class DeepSeekClient(BaseClient):
 
 class MoonshotClient(BaseClient):
     def __init__(self, model="kimi-k2-0905-preview"):
+        self.model = model
+        self._validate_environment()
+        
+    def _validate_environment(self):
         api_key = os.getenv("MOONSHOT_API_KEY")
         if not api_key:
-            raise ValueError("MOONSHOT_API_KEY not found in environment variables")
-        
-        # Updated to use the correct base URL from the official documentation
+            raise ValueError("MOONSHOT_API_KEY environment variable is required but not set")
         self.client = OpenAI(
-            base_url="https://api.moonshot.ai/v1",  # Corrected base URL
+            base_url="https://api.moonshot.ai/v1",
             api_key=api_key
         )
-        self.model = model
-
+    
     def chat(self, messages, temperature=0.7, max_tokens=None, stream=False):
         try:
             response = self.client.chat.completions.create(
@@ -200,9 +233,19 @@ class MoonshotClient(BaseClient):
 
 class OllamaClient(BaseClient):
     def __init__(self, model="llama2"):
-        self.client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
         self.model = model
-
+        self._validate_environment()
+        
+    def _validate_environment(self):
+        try:
+            # Check if Ollama is running
+            test_client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
+            test_client.models.list()  # This will fail if Ollama is not running
+        except Exception as e:
+            raise ValueError(f"Ollama server is not running or not accessible: {str(e)}")
+        
+        self.client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
+    
     def chat(self, messages, temperature=0.7, max_tokens=None, stream=False):
         response = self.client.chat.completions.create(
             model=self.model,
@@ -225,17 +268,18 @@ class OllamaClient(BaseClient):
 
 class ZAIClient(BaseClient):
     def __init__(self, model="glm-4.5-flash"):
+        self.model = model
+        self._validate_environment()
+        
+    def _validate_environment(self):
         api_key = os.getenv("ZAI_API_KEY")
         if not api_key:
-            raise ValueError("ZAI_API_KEY not found in environment variables")
-        
-        # Updated to use the correct base URL from Z.ai documentation
+            raise ValueError("ZAI_API_KEY environment variable is required but not set")
         self.client = OpenAI(
             base_url="https://api.z.ai/api/paas/v4/",
             api_key=api_key
         )
-        self.model = model
-
+    
     def chat(self, messages, temperature=0.7, max_tokens=None, stream=False):
         try:
             response = self.client.chat.completions.create(
@@ -264,12 +308,14 @@ class EragAPI:
     }
 
     def __init__(self, api_type, model=None):
+        if api_type not in self.CLIENTS:
+            raise ValueError(f"Unknown provider: {api_type}")
         self.client = self.CLIENTS[api_type](model or self.default_model(api_type))
 
     @staticmethod
     def default_model(api_type):
         return {
-            "groq": "mixtral-8x7b-32768",
+            "groq": "groq-gemma2-9b-it",  # Updated to a current Groq model
             "gemini": "gemini-pro",
             "cohere": "command",
             "deepseek": "deepseek-chat",
@@ -388,9 +434,44 @@ def format_sse_chunk(chunk):
     
     return ""
 
+def validate_chat_request(request):
+    """Validate the chat request parameters."""
+    if not request.model:
+        raise ValueError("Model parameter is required")
+    
+    if not request.messages or not isinstance(request.messages, list) or len(request.messages) == 0:
+        raise ValueError("Messages parameter must be a non-empty list")
+    
+    for message in request.messages:
+        if not isinstance(message, dict) or "role" not in message or "content" not in message:
+            raise ValueError("Each message must be a dictionary with 'role' and 'content' keys")
+        
+        if message["role"] not in ["user", "assistant", "system"]:
+            raise ValueError(f"Invalid message role: {message['role']}")
+
+def validate_generate_request(request):
+    """Validate the generate request parameters."""
+    if not request.model:
+        raise ValueError("Model parameter is required")
+    
+    if not request.prompt or not isinstance(request.prompt, str):
+        raise ValueError("Prompt parameter must be a non-empty string")
+
+def make_client(provider: str, model: str) -> EragAPI:
+    """Light-weight factory: one client == one request."""
+    return EragAPI(provider, model)
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint."""
+    return {"status": "healthy", "message": "EragAPI is running"}
+
 @app.post("/api/chat")
 async def chat_endpoint(request: ChatRequest):
     try:
+        # Validate the request
+        validate_chat_request(request)
+        
         # Parse the model string properly
         provider, model_name = parse_model_string(request.model)
         
@@ -400,7 +481,8 @@ async def chat_endpoint(request: ChatRequest):
         if provider not in EragAPI.CLIENTS:
             raise HTTPException(400, f"Unknown provider: {provider}")
         
-        erag = EragAPI(provider, model_name)
+        # Create a new client for this request
+        erag = make_client(provider, model_name)
         
         if request.stream:
             def stream_generator():
@@ -451,6 +533,9 @@ async def chat_endpoint(request: ChatRequest):
         response = erag.chat(request.messages, request.temperature, request.max_tokens)
         return {"message": response}
         
+    except ValueError as e:
+        print(f"Validation error: {e}")
+        raise HTTPException(400, str(e))
     except Exception as e:
         print(f"Chat endpoint error: {e}")
         raise HTTPException(500, str(e))
@@ -458,6 +543,9 @@ async def chat_endpoint(request: ChatRequest):
 @app.post("/api/generate")
 async def generate_endpoint(request: GenerateRequest):
     try:
+        # Validate the request
+        validate_generate_request(request)
+        
         # Parse the model string properly
         provider, model_name = parse_model_string(request.model)
         
@@ -467,7 +555,8 @@ async def generate_endpoint(request: GenerateRequest):
         if provider not in EragAPI.CLIENTS:
             raise HTTPException(400, f"Unknown provider: {provider}")
         
-        erag = EragAPI(provider, model_name)
+        # Create a new client for this request
+        erag = make_client(provider, model_name)
         
         if request.stream:
             def stream_generator():
@@ -509,6 +598,9 @@ async def generate_endpoint(request: GenerateRequest):
         response = erag.complete(request.prompt, request.temperature, request.max_tokens)
         return {"response": response}
         
+    except ValueError as e:
+        print(f"Validation error: {e}")
+        raise HTTPException(400, str(e))
     except Exception as e:
         print(f"Generate endpoint error: {e}")
         raise HTTPException(500, str(e))
