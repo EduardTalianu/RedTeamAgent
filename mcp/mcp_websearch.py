@@ -29,6 +29,8 @@ class McpWebsearch(MCPTool):
         self.results_dir = "results"
         self.websearch_results_dir = os.path.join(self.results_dir, "websearch")
         os.makedirs(self.websearch_results_dir, exist_ok=True)
+        # Set snippet length for LLM (5000 characters as requested)
+        self.llm_snippet_length = 5000
     
     def get_description(self) -> str:
         return "Search the web for information using various search engines."
@@ -178,20 +180,27 @@ class McpWebsearch(MCPTool):
         self.last_query = query
         
         if engine == "duckduckgo":
-            result = self._search_duckduckgo(query, num_results)
+            search_results = self._search_duckduckgo(query, num_results)
         elif engine == "google":
-            result = self._search_google(query, num_results, region)
+            search_results = self._search_google(query, num_results, region)
         elif engine == "bing":
-            result = self._search_bing(query, num_results, region)
+            search_results = self._search_bing(query, num_results, region)
         else:
             return f"Unsupported search engine: {engine}"
         
-        # Save results to file
-        self._save_results(query, result)
+        # Format results for LLM (with truncated snippets)
+        llm_result = self._format_results_for_llm(query, search_results)
         
-        return result
+        # Format results for file saving (with full snippets)
+        file_result = self._format_results_for_file(query, search_results)
+        
+        # Save full results to file
+        self._save_results(query, file_result)
+        
+        # Return truncated results to LLM
+        return llm_result
     
-    def _search_duckduckgo(self, query: str, num_results: int) -> str:
+    def _search_duckduckgo(self, query: str, num_results: int) -> list:
         """Search using DuckDuckGo HTML scraping (no API key needed)."""
         try:
             headers = {'User-Agent': self.user_agents[0]}
@@ -234,15 +243,17 @@ class McpWebsearch(MCPTool):
                     final_results.append(r)
             
             self.last_results = final_results
-            return self._format_results(query, final_results)
+            return final_results
             
         except Exception as e:
-            return f"Search error: {str(e)}"
+            print(f"Search error: {str(e)}")
+            return []
     
-    def _search_google(self, query: str, num_results: int, region: str) -> str:
+    def _search_google(self, query: str, num_results: int, region: str) -> list:
         """Search using Google (requires API key)."""
         if not self.api_key:
-            return "Google search requires an API key"
+            print("Google search requires an API key")
+            return []
         
         try:
             url = "https://www.googleapis.com/customsearch/v1"
@@ -268,15 +279,17 @@ class McpWebsearch(MCPTool):
                     })
             
             self.last_results = results
-            return self._format_results(query, results)
+            return results
             
         except Exception as e:
-            return f"Search error: {str(e)}"
+            print(f"Search error: {str(e)}")
+            return []
     
-    def _search_bing(self, query: str, num_results: int, region: str) -> str:
+    def _search_bing(self, query: str, num_results: int, region: str) -> list:
         """Search using Bing (requires API key)."""
         if not self.api_key:
-            return "Bing search requires an API key"
+            print("Bing search requires an API key")
+            return []
         
         try:
             url = "https://api.bing.microsoft.com/v7.0/search"
@@ -301,19 +314,32 @@ class McpWebsearch(MCPTool):
                     })
             
             self.last_results = results
-            return self._format_results(query, results)
+            return results
             
         except Exception as e:
-            return f"Search error: {str(e)}"
+            print(f"Search error: {str(e)}")
+            return []
     
-    def _format_results(self, query: str, results: list) -> str:
-        """Format search results for display."""
+    def _format_results_for_llm(self, query: str, results: list) -> str:
+        """Format search results for LLM (with truncated snippets)."""
         lines = [f"Web Search Results for '{query}':\n"]
         for i, r in enumerate(results[:self.max_results], 1):
             lines.append(f"{i}. {r.get('title', 'No title')}\n")
             snippet = r.get('snippet') or ""
-            if len(snippet) > 300:
-                snippet = snippet[:300] + "..."
+            # Truncate snippet to first 5000 characters for LLM
+            if len(snippet) > self.llm_snippet_length:
+                snippet = snippet[:self.llm_snippet_length] + "..."
+            lines.append(f"   {snippet}\n")
+            lines.append(f"   URL: {r.get('url', '')}\n\n")
+        return "\n".join(lines)
+    
+    def _format_results_for_file(self, query: str, results: list) -> str:
+        """Format search results for file saving (with full snippets)."""
+        lines = [f"Web Search Results for '{query}':\n"]
+        for i, r in enumerate(results[:self.max_results], 1):
+            lines.append(f"{i}. {r.get('title', 'No title')}\n")
+            snippet = r.get('snippet') or ""
+            # Use full snippet for file saving
             lines.append(f"   {snippet}\n")
             lines.append(f"   URL: {r.get('url', '')}\n\n")
         return "\n".join(lines)
@@ -375,9 +401,9 @@ class McpWebsearch(MCPTool):
             "Do not include it in your thinking process or examples unless you want it to be executed. "
             "The search results will be automatically executed and provided back to you. "
             "Use this tool when you need up-to-date information or specific facts not in your training data. "
-            "The tool will return a formatted list of search results with titles, snippets, and URLs. "
+            "The tool will return a formatted list of search results with titles, snippets (first 5000 characters), and URLs. "
             "You can then use this information to answer the user's question. "
             "Be specific with your search queries to get the most relevant results. "
             "Note: The tool uses DuckDuckGo by default which doesn't require an API key. "
-            "All results are saved to the results/websearch/ directory for later reference."
+            "All results are saved to the results/websearch/ directory with full snippets for later reference."
         )
