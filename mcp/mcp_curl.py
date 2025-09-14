@@ -1,440 +1,243 @@
-# mcp_curl.py
+# mcp_curl.py - Simplified curl tool
 import subprocess
 import re
-import xml.etree.ElementTree as ET
 import os
 import datetime
-import shlex
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, Optional
 from mcp_base import MCPTool
 
 class McpCurl(MCPTool):
-    """MCP-compliant curl tool with proper command execution and results saving."""
+    """Simplified curl tool for HTTP requests and basic security testing."""
     
     def __init__(self):
         super().__init__()
         self.friendly_name = "Curl"
-        # Create results directory structure
-        self.results_dir = "results"
-        self.curl_results_dir = os.path.join(self.results_dir, "curl")
-        os.makedirs(self.curl_results_dir, exist_ok=True)
+        self.default_timeout = 30
+        
+        # Create results directory
+        self.results_dir = os.path.join("results", "curl")
+        os.makedirs(self.results_dir, exist_ok=True)
+        
+        # Common curl commands
+        self.predefined_commands = {
+            1: {"name": "Basic GET", "template": "curl -s {target}"},
+            2: {"name": "Headers Only", "template": "curl -s -I {target}"},
+            3: {"name": "Verbose", "template": "curl -v {target}"},
+            4: {"name": "Follow Redirects", "template": "curl -s -L {target}"},
+            5: {"name": "With User-Agent", "template": "curl -s -H 'User-Agent: Mozilla/5.0' {target}"},
+            6: {"name": "POST Request", "template": "curl -s -X POST -d '{data}' {target}"},
+            7: {"name": "JSON POST", "template": "curl -s -X POST -H 'Content-Type: application/json' -d '{data}' {target}"},
+            8: {"name": "Basic Auth", "template": "curl -s -u '{auth}' {target}"}
+        }
     
     def get_description(self) -> str:
-        return "Execute curl commands for web requests, security testing, and API interaction."
-    
-    def get_schema(self) -> Dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "The curl command to execute",
-                    "enum": ["raw", "predefined"]
-                },
-                "raw_command": {
-                    "type": "string",
-                    "description": "Custom curl command (if command is 'raw')"
-                },
-                "command_id": {
-                    "type": "integer",
-                    "description": "ID of predefined command (if command is 'predefined')"
-                },
-                "target": {
-                    "type": "string",
-                    "description": "Target URL or endpoint"
-                },
-                "timeout": {
-                    "type": "number",
-                    "description": "Timeout in seconds",
-                    "default": 30
-                },
-                "data": {
-                    "type": "string",
-                    "description": "Data to send with the request"
-                },
-                "auth": {
-                    "type": "string",
-                    "description": "Authentication token or credentials"
-                }
-            },
-            "required": ["command", "target"]
-        }
-    
-    def get_capabilities(self) -> List[str]:
-        return [
-            "http_request",
-            "https_request",
-            "ftp_request",
-            "file_download",
-            "api_interaction",
-            "security_testing",
-            "header_analysis",
-            "cookie_handling",
-            "proxy_support"
-        ]
-    
-    def execute(self, params: Dict[str, Any]) -> str:
-        """Execute curl command with MCP parameters."""
-        # Validate parameters
-        is_valid, error_msg = self.validate_params(params)
-        if not is_valid:
-            return f"Parameter validation failed: {error_msg}"
-        
-        command_type = params.get("command")
-        target = params.get("target", "")
-        timeout = params.get("timeout", 30)
-        
-        # Strip any extra whitespace or newlines from the target
-        target = target.strip()
-        
-        if command_type == "raw":
-            result = self._execute_raw_command(params)
-        elif command_type == "predefined":
-            result = self._execute_predefined_command(params)
-        else:
-            return f"Invalid command type: {command_type}"
-        
-        # Save results to file
-        self._save_curl_result(target, result)
-        
-        return result
-    
-    def _execute_raw_command(self, params: Dict[str, Any]) -> str:
-        """Execute raw curl command with proper quoting."""
-        raw_command = params.get("raw_command", "")
-        target = params.get("target", "")
-        timeout = params.get("timeout", 30)
-        
-        # Strip any extra whitespace or newlines from the target
-        target = target.strip()
-        
-        # Build command list instead of string to avoid shell interpretation issues
-        if '{target}' in raw_command:
-            cmd_str = raw_command.replace('{target}', target)
-        elif target not in raw_command:
-            cmd_str = f"{raw_command} {target}"
-        else:
-            cmd_str = raw_command
-        
-        # Use shlex.split to properly handle quotes
-        try:
-            cmd_list = shlex.split(cmd_str)
-        except ValueError as e:
-            return f"Command parsing error: {str(e)}"
-        
-        # Add -k option if it's an HTTPS URL and not already present
-        if target.startswith("https://") and "-k" not in cmd_list and "--insecure" not in cmd_list:
-            # Insert -k after the curl command
-            if len(cmd_list) > 0 and cmd_list[0] == "curl":
-                cmd_list.insert(1, "-k")
-        
-        try:
-            result = subprocess.run(
-                cmd_list,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=timeout,
-                text=True
-            )
-            
-            output = result.stdout if result.stdout else result.stderr
-            return self._format_response(" ".join(cmd_list), output, result.returncode, timeout)
-            
-        except subprocess.TimeoutExpired:
-            return f"CURL EXECUTION TIMEOUT after {timeout}s"
-        except Exception as e:
-            return f"CURL EXECUTION ERROR: {str(e)}"
-    
-    def _execute_predefined_command(self, params: Dict[str, Any]) -> str:
-        """Execute predefined curl command with proper quoting."""
-        command_id = params.get("command_id")
-        target = params.get("target", "")
-        timeout = params.get("timeout", 30)
-        data = params.get("data", "")
-        auth = params.get("auth", "")
-        
-        # Strip any extra whitespace or newlines from the target
-        target = target.strip()
-        
-        # Get command template
-        command_info = self._get_command_by_id(command_id)
-        if not command_info:
-            return f"Error: Command ID {command_id} not found"
-        
-        # Build command
-        command_template = command_info['template']
-        cmd_str = command_template.format(target=target)
-        
-        # Handle replacements
-        if data:
-            cmd_str = cmd_str.replace('{data}', data)
-            cmd_str = cmd_str.replace('YOUR_DATA', data)
-        
-        if auth:
-            cmd_str = cmd_str.replace('YOUR_TOKEN', auth)
-            cmd_str = cmd_str.replace('user:pass', auth)
-        
-        # Use shlex.split to properly handle quotes
-        try:
-            cmd_list = shlex.split(cmd_str)
-        except ValueError as e:
-            return f"Command parsing error: {str(e)}"
-        
-        # Add -k option if it's an HTTPS URL and not already present
-        if target.startswith("https://") and "-k" not in cmd_list and "--insecure" not in cmd_list:
-            # Insert -k after the curl command
-            if len(cmd_list) > 0 and cmd_list[0] == "curl":
-                cmd_list.insert(1, "-k")
-        
-        try:
-            result = subprocess.run(
-                cmd_list,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=timeout,
-                text=True
-            )
-            
-            output = result.stdout if result.stdout else result.stderr
-            return self._format_response(" ".join(cmd_list), output, result.returncode, timeout)
-            
-        except subprocess.TimeoutExpired:
-            return f"CURL EXECUTION TIMEOUT after {timeout}s"
-        except Exception as e:
-            return f"CURL EXECUTION ERROR: {str(e)}"
-    
-    def _format_response(self, command: str, output: str, return_code: int, timeout: int) -> str:
-        """Format the response with metadata."""
-        response = f"CURL EXECUTION {'SUCCESS' if return_code == 0 else 'COMPLETED'}\n"
-        response += f"Command: {command}\n"
-        response += f"Return Code: {return_code}\n"
-        response += f"Timeout: {timeout}s\n"
-        response += f"{'='*50}\n"
-        response += output
-        return response
-    
-    def _get_command_by_id(self, command_id: int) -> Optional[Dict[str, Any]]:
-        """Get command definition by ID."""
-        commands = {
-            1: {
-                "name": "Basic GET",
-                "template": "curl {target}",
-                "description": "Basic HTTP GET request"
-            },
-            2: {
-                "name": "Headers Only",
-                "template": "curl -I {target}",
-                "description": "Get headers only"
-            },
-            3: {
-                "name": "Follow Redirects",
-                "template": "curl -L {target}",
-                "description": "Follow redirects"
-            },
-            4: {
-                "name": "Verbose Output",
-                "template": "curl -v {target}",
-                "description": "Verbose output"
-            },
-            5: {
-                "name": "POST Request",
-                "template": "curl -X POST -d '{data}' {target}",
-                "description": "POST request with data"
-            },
-            6: {
-                "name": "With Headers",
-                "template": "curl -H 'Content-Type: application/json' {target}",
-                "description": "Request with custom headers"
-            },
-            7: {
-                "name": "With Authentication",
-                "template": "curl -u 'user:pass' {target}",
-                "description": "Basic authentication"
-            },
-            8: {
-                "name": "Save to File",
-                "template": "curl -o output.txt {target}",
-                "description": "Save response to file"
-            }
-        }
-        return commands.get(command_id)
+        return "Execute curl commands for HTTP requests, API testing, and basic reconnaissance."
     
     def detect_request(self, text: str) -> Optional[Dict[str, Any]]:
-        """Detect if text is requesting a curl operation."""
-        # Check for XML tool format first
-        if '<tool>' in text and '<name>curl</name>' in text:
-            # Extract parameters from XML
-            try:
-                # Try to extract the XML block
-                xml_pattern = r'```xml\s*\n*\s*(<tool>.*?</tool>)\s*\n*\s*```'
-                match = re.search(xml_pattern, text, re.IGNORECASE | re.DOTALL)
-                if match:
-                    xml_str = match.group(1)
-                else:
-                    # Try without code block
-                    simple_pattern = r'(<tool>.*?</tool>)'
-                    match = re.search(simple_pattern, text, re.IGNORECASE | re.DOTALL)
-                    if match:
-                        xml_str = match.group(1)
-                    else:
-                        # Try without proper tags
-                        fallback_pattern = r'<tool>.*?</tool>'
-                        match = re.search(fallback_pattern, text, re.IGNORECASE | re.DOTALL)
-                        if match:
-                            xml_str = match.group(0)
-                        else:
-                            return None
-                
-                return self._parse_tool_command(xml_str)
-            except Exception as e:
-                print(f"Error parsing XML: {str(e)}")
-                return None
+        """Detect curl command requests."""
         
-        # Check for raw command pattern
-        if re.search(r'curl\s+.*https?://', text, re.IGNORECASE):
+        # Check for XML format
+        xml_match = re.search(r'<tool>\s*<n>curl</n>\s*<parameters>(.*?)</parameters>\s*</tool>', 
+                             text, re.IGNORECASE | re.DOTALL)
+        if xml_match:
+            params_text = xml_match.group(1)
+            params = {}
+            
+            # Extract common parameters
+            target_match = re.search(r'<target>(.*?)</target>', params_text, re.DOTALL)
+            if target_match:
+                params["target"] = target_match.group(1).strip()
+            
+            # Check for command_id (predefined command)
+            cmd_id_match = re.search(r'<command_id>(\d+)</command_id>', params_text)
+            if cmd_id_match:
+                params["command_id"] = int(cmd_id_match.group(1))
+                params["command_type"] = "predefined"
+            else:
+                # Check for raw command
+                raw_match = re.search(r'<raw_command>(.*?)</raw_command>', params_text, re.DOTALL)
+                if raw_match:
+                    params["raw_command"] = raw_match.group(1).strip()
+                    params["command_type"] = "raw"
+            
+            # Optional parameters
+            data_match = re.search(r'<data>(.*?)</data>', params_text, re.DOTALL)
+            if data_match:
+                params["data"] = data_match.group(1).strip()
+            
+            auth_match = re.search(r'<auth>(.*?)</auth>', params_text, re.DOTALL)
+            if auth_match:
+                params["auth"] = auth_match.group(1).strip()
+            
+            if "target" in params:
+                return params
+        
+        # Check for direct curl commands
+        curl_match = re.search(r'curl\s+.*?(https?://[^\s]+)', text, re.IGNORECASE)
+        if curl_match:
             return {
-                "command": "raw",
+                "target": curl_match.group(1),
                 "raw_command": text.strip(),
-                "target": self._extract_url(text)
+                "command_type": "raw"
             }
-        
-        # Check for predefined command pattern
-        if re.search(r'curl\s+command\s+(\d+)', text, re.IGNORECASE):
-            match = re.search(r'curl\s+command\s+(\d+)', text, re.IGNORECASE)
-            if match:
-                return {
-                    "command": "predefined",
-                    "command_id": int(match.group(1)),
-                    "target": self._extract_url(text)
-                }
         
         return None
     
-    def _parse_tool_command(self, xml_str: str) -> Optional[Dict[str, Any]]:
-        """Parse an XML tool command and extract parameters."""
+    def execute(self, params: Dict[str, Any]) -> str:
+        """Execute curl command."""
+        target = params.get("target", "").strip()
+        if not target:
+            return "Error: Target URL is required"
+        
+        command_type = params.get("command_type", "predefined")
+        
         try:
-            root = ET.fromstring(xml_str)
+            if command_type == "predefined":
+                result = self._execute_predefined_command(params)
+            else:
+                result = self._execute_raw_command(params)
             
-            # Validate the tool name
-            tool_name = root.find('name')
-            if tool_name is None or tool_name.text.lower() != 'curl':
-                return None
-                
-            # Extract and validate parameters
-            params = {"command": "raw", "target": ""}
-            params_elem = root.find('parameters')
-            if params_elem is not None:
-                # Extract target
-                target_elem = params_elem.find('target')
-                if target_elem is not None and target_elem.text:
-                    params["target"] = target_elem.text.strip()
-                
-                # Extract raw_command
-                raw_command_elem = params_elem.find('raw_command')
-                if raw_command_elem is not None and raw_command_elem.text:
-                    params["raw_command"] = raw_command_elem.text.strip()
-                
-                # Extract command_id
-                command_id_elem = params_elem.find('command_id')
-                if command_id_elem is not None and command_id_elem.text:
-                    try:
-                        params["command_id"] = int(command_id_elem.text.strip())
-                        params["command"] = "predefined"
-                    except ValueError:
-                        pass
-                
-                # Extract timeout
-                timeout_elem = params_elem.find('timeout')
-                if timeout_elem is not None and timeout_elem.text:
-                    try:
-                        params["timeout"] = float(timeout_elem.text.strip())
-                    except ValueError:
-                        pass
-                
-                # Extract data
-                data_elem = params_elem.find('data')
-                if data_elem is not None and data_elem.text:
-                    params["data"] = data_elem.text.strip()
-                
-                # Extract auth
-                auth_elem = params_elem.find('auth')
-                if auth_elem is not None and auth_elem.text:
-                    params["auth"] = auth_elem.text.strip()
-                
-                # If we have a target, return the params
-                if params["target"]:
-                    return params
-                        
-            return None
-                        
+            # Save results
+            self._save_results(target, result)
+            
+            return result
+            
         except Exception as e:
-            print(f"Error parsing XML: {str(e)}")
-            return None
+            return f"Curl execution error: {str(e)}"
     
-    def _extract_url(self, text: str) -> str:
-        """Extract URL from text."""
-        url_pattern = r'https?://[^\s]+'
-        match = re.search(url_pattern, text)
-        return match.group(0) if match else ""
+    def _execute_predefined_command(self, params: Dict[str, Any]) -> str:
+        """Execute a predefined curl command."""
+        command_id = params.get("command_id", 1)
+        target = params["target"]
+        data = params.get("data", "")
+        auth = params.get("auth", "")
+        
+        if command_id not in self.predefined_commands:
+            return f"Error: Invalid command ID {command_id}"
+        
+        cmd_info = self.predefined_commands[command_id]
+        command_template = cmd_info["template"]
+        
+        # Replace placeholders
+        command = command_template.replace("{target}", target)
+        if "{data}" in command:
+            command = command.replace("{data}", data if data else "")
+        if "{auth}" in command:
+            command = command.replace("{auth}", auth if auth else "user:pass")
+        
+        return self._run_curl_command(command, cmd_info["name"])
     
-    def _save_curl_result(self, target: str, result: str):
-        """Save curl result to a file in the results/curl/ directory."""
+    def _execute_raw_command(self, params: Dict[str, Any]) -> str:
+        """Execute a raw curl command."""
+        raw_command = params.get("raw_command", "")
+        target = params["target"]
+        
+        if raw_command:
+            # Use the provided raw command
+            command = raw_command
+        else:
+            # Default to basic GET
+            command = f"curl -s {target}"
+        
+        return self._run_curl_command(command, "Raw Command")
+    
+    def _run_curl_command(self, command: str, command_name: str) -> str:
+        """Run the actual curl command."""
         try:
-            # Create a safe filename from the target URL
-            safe_target = re.sub(r'[^\w\s-]', '', target).strip()
-            safe_target = re.sub(r'[-\s]+', '-', safe_target)
+            # Add insecure flag for HTTPS if not present
+            if "https://" in command and "-k" not in command and "--insecure" not in command:
+                command = command.replace("curl", "curl -k", 1)
+            
+            # Split command for subprocess
+            cmd_parts = command.split()
+            
+            # Execute command
+            result = subprocess.run(
+                cmd_parts,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=self.default_timeout,
+                text=True
+            )
+            
+            # Format output
+            output = []
+            output.append(f"CURL COMMAND: {command_name}")
+            output.append(f"Command: {command}")
+            output.append(f"Return Code: {result.returncode}")
+            output.append("-" * 50)
+            
+            if result.stdout:
+                output.append("STDOUT:")
+                output.append(result.stdout)
+            
+            if result.stderr:
+                output.append("STDERR:")
+                output.append(result.stderr)
+            
+            return "\n".join(output)
+            
+        except subprocess.TimeoutExpired:
+            return f"TIMEOUT: Command exceeded {self.default_timeout} seconds"
+        except FileNotFoundError:
+            return "ERROR: curl command not found. Please install curl."
+        except Exception as e:
+            return f"ERROR: {str(e)}"
+    
+    def _save_results(self, target: str, result: str):
+        """Save curl results to file."""
+        try:
+            # Create safe filename
+            safe_target = re.sub(r'[^\w.-]', '_', target.replace('https://', '').replace('http://', ''))
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"curl_{timestamp}_{safe_target[:50]}.txt"
-            filepath = os.path.join(self.curl_results_dir, filename)
+            filename = f"curl_{timestamp}_{safe_target[:30]}.txt"
+            filepath = os.path.join(self.results_dir, filename)
             
             with open(filepath, 'w', encoding='utf-8') as f:
-                f.write(f"Tool: Curl\n")
+                f.write(f"Curl Execution Results\n")
                 f.write(f"Target: {target}\n")
                 f.write(f"Timestamp: {datetime.datetime.now().isoformat()}\n")
                 f.write("=" * 50 + "\n\n")
                 f.write(result)
             
-            print(f"Curl result saved to: {filepath}")
         except Exception as e:
-            print(f"Error saving curl result: {str(e)}")
+            print(f"Error saving curl results: {e}")
     
     def get_system_prompt(self) -> str:
-        """Return the system prompt for this tool."""
+        """Return system prompt for curl tool."""
+        commands_list = []
+        for cmd_id, cmd_info in self.predefined_commands.items():
+            commands_list.append(f"{cmd_id}. {cmd_info['name']}: {cmd_info['template']}")
+        
+        commands_text = "\n".join(commands_list)
+        
         return (
-            f"You have access to {self.name}. {self.description} "
-            "When you need to execute curl commands, use the following XML format:\n"
+            f"You have access to {self.friendly_name}. {self.description} "
+            "Use this for HTTP requests, API testing, and basic reconnaissance.\n\n"
+            "To use curl, include this XML in your response:\n"
             "```xml\n"
             "<tool>\n"
-            "  <name>curl</name>\n"
+            "  <n>curl</n>\n"
             "  <parameters>\n"
-            "    <command>raw</command>\n"
-            "    <raw_command>curl -I</raw_command>\n"
-            "    <target>https://example.com</target>\n"
-            "    <timeout>30</timeout>\n"
-            "  </parameters>\n"
-            "</tool>\n"
-            "```\n\n"
-            "Alternatively, you can use predefined commands:\n"
-            "```xml\n"
-            "<tool>\n"
-            "  <name>curl</name>\n"
-            "  <parameters>\n"
-            "    <command>predefined</command>\n"
             "    <command_id>2</command_id>\n"
             "    <target>https://example.com</target>\n"
             "  </parameters>\n"
             "</tool>\n"
             "```\n\n"
-            "Available predefined commands:\n"
-            "1. Basic GET: curl {target}\n"
-            "2. Headers Only: curl -I {target}\n"
-            "3. Follow Redirects: curl -L {target}\n"
-            "4. Verbose Output: curl -v {target}\n"
-            "5. POST Request: curl -X POST -d '{data}' {target}\n"
-            "6. With Headers: curl -H 'Content-Type: application/json' {target}\n"
-            "7. With Authentication: curl -u 'user:pass' {target}\n"
-            "8. Save to File: curl -o output.txt {target}\n\n"
-            "Only use this format when you actually want to execute the tool. "
-            "The curl results will be automatically executed and provided back to you. "
-            "All results are saved to the results/curl/ directory for later reference."
+            f"Available predefined commands:\n{commands_text}\n\n"
+            "For custom commands, use raw_command instead:\n"
+            "```xml\n"
+            "<tool>\n"
+            "  <n>curl</n>\n"
+            "  <parameters>\n"
+            "    <raw_command>curl -v -H 'Accept: application/json'</raw_command>\n"
+            "    <target>https://api.example.com</target>\n"
+            "  </parameters>\n"
+            "</tool>\n"
+            "```\n\n"
+            "Examples:\n"
+            "- Get headers: command_id=2, target=https://example.com\n"
+            "- Verbose output: command_id=3, target=https://example.com\n"
+            "- POST data: command_id=6, target=https://api.com, data={\"key\":\"value\"}\n\n"
+            "Results are automatically saved to results/curl/ directory."
         )

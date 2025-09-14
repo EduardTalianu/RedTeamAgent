@@ -1,39 +1,36 @@
-# mcp_base.py
+# mcp_base.py - Simplified MCP base class
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List, Optional, Tuple
-import re
+from typing import Dict, Any, List, Optional
 
 class MCPTool(ABC):
+    """Simplified base class for MCP tools."""
+    
     def __init__(self):
         self.name = self.__class__.__name__.lower()
         self.enabled = False
         self.description = self.get_description()
-        self.version = "1.0"
         self.friendly_name = self.name  # Default friendly name
     
     @abstractmethod
     def get_description(self) -> str:
-        """Return a description of the tool."""
-        pass
-    
-    @abstractmethod
-    def get_schema(self) -> Dict[str, Any]:
-        """Return the JSON schema for the tool's parameters."""
+        """Return a brief description of what this tool does."""
         pass
     
     @abstractmethod
     def execute(self, params: Dict[str, Any]) -> str:
-        """Execute the tool with the given parameters."""
+        """Execute the tool with given parameters and return result as string."""
         pass
     
     def detect_request(self, text: str) -> Optional[Dict[str, Any]]:
-        """Detect if the text is requesting this tool and return parameters if so."""
+        """
+        Detect if the text contains a request for this tool.
+        Return parameters dictionary if detected, None otherwise.
+        """
         return None
     
-    def get_capabilities(self) -> List[str]:
-        """Return a list of capabilities this tool provides."""
-        return []
-    
-    def validate_params(self, params: Dict[str, Any]) -> Tuple[bool, str]:
-        """Validate parameters against the schema."""
-        return True, "Validation passed"
+    def get_system_prompt(self) -> str:
+        """
+        Return system prompt explaining how to use this tool.
+        Override in subclasses for tool-specific instructions.
+        """
+        return f"You have access to {self.friendly_name}: {self.description}"
