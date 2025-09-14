@@ -1,6 +1,6 @@
 """
-Enhanced agent system with streaming support and improved rate limiting.
-Includes better model selection and conversation management.
+Enhanced agent system with proper tool integration and conversation management.
+Fixes the issues with tool detection and usage.
 """
 
 import threading
@@ -92,9 +92,9 @@ class BaseAgent:
         raise NotImplementedError
 
 
-class StreamingGenericAgent(BaseAgent):
+class EnhancedGenericAgent(BaseAgent):
     """
-    Enhanced generic agent with streaming support and improved rate limiting.
+    Enhanced generic agent with proper tool integration and conversation management.
     """
     
     def __init__(
@@ -116,52 +116,20 @@ class StreamingGenericAgent(BaseAgent):
         
         self.task_type = task_type
         self.task_params = task_params
-        self.tools = {k: v for k, v in tools.items() if k != 'mcp_agent_creator'}
+        self.tools = {k: v for k, v in tools.items() if k != 'mcp_agent_creator'}  # Exclude agent creator
         self.server_url = server_url
-        self.model = self._select_best_model(model)
+        self.model = model
         
-        # Enhanced limits and settings
-        self.max_iterations = 25  # Increased from 15
-        self.api_timeout = 60     # Increased timeout
-        self.use_streaming = True  # Enable streaming by default
-        self.max_tokens_per_request = 1500  # Reasonable chunk size
-        
-        # Track tool usage and streaming
+        # Track tool usage
         self.tools_used = []
         self.tool_results = []
-        self.streaming_chunks = []
-        
-        # Rate limiting protection
-        self.last_api_call = 0
-        self.min_api_interval = 2  # Minimum 2 seconds between API calls
-        self.rate_limit_backoff = 5  # Start with 5 second backoff
-        self.max_backoff = 300  # Max 5 minute backoff
         
         # Initialize conversation with enhanced system prompt
         self._initialize_enhanced_conversation()
     
-    def _select_best_model(self, requested_model: str) -> str:
-        """Select the best available model with fallback options."""
-        # Model priority order (from fastest/cheapest to most capable)
-        model_priorities = [
-            "groq-llama-3.1-8b-instant",    # Fast and efficient
-            "groq-gemma2-9b-it",            # Good balance
-            "groq-llama-3.1-70b-versatile", # More capable but slower
-            "groq-mixtral-8x7b-32768",      # Fallback
-            "groq-llama2-70b-4096"          # Last resort
-        ]
-        
-        # If requested model is in our priority list, use it
-        if any(requested_model.endswith(model.split('-', 1)[1]) for model in model_priorities):
-            return requested_model
-        
-        # Otherwise, default to the first (fastest) option
-        print(f"Agent {self.name}: Using default model instead of {requested_model}")
-        return model_priorities[0]
-    
     def _initialize_enhanced_conversation(self):
-        """Initialize agent with comprehensive system prompt."""
-        system_prompt = self._build_comprehensive_system_prompt()
+        """Initialize agent with comprehensive system prompt and task instructions."""
+        system_prompt = self._build_enhanced_system_prompt()
         initial_task = self._build_detailed_task_message()
         
         self.conversation_history = [
@@ -169,39 +137,40 @@ class StreamingGenericAgent(BaseAgent):
             {"role": "user", "content": initial_task}
         ]
     
-    def _build_comprehensive_system_prompt(self) -> str:
-        """Build comprehensive system prompt with streaming awareness."""
+    def _build_enhanced_system_prompt(self) -> str:
+        """Build comprehensive system prompt with tool awareness."""
         # Build detailed tools description
         tools_descriptions = []
         for tool_name, tool in self.tools.items():
             if getattr(tool, 'enabled', True):
                 display_name = getattr(tool, 'friendly_name', tool_name)
                 description = getattr(tool, 'description', 'No description')
+                
+                # Get tool's system prompt for usage instructions
                 system_prompt = getattr(tool, 'get_system_prompt', lambda: '')()
                 
                 tools_descriptions.append(f"=== {display_name} ===")
                 tools_descriptions.append(f"Description: {description}")
                 if system_prompt:
-                    tools_descriptions.append(f"Usage:\n{system_prompt}")
+                    tools_descriptions.append(f"Usage Instructions:\n{system_prompt}")
                 tools_descriptions.append("")
         
         tools_text = "\n".join(tools_descriptions) if tools_descriptions else "No tools available"
         
         # Task-specific guidance
-        task_guidance = self._get_enhanced_task_guidance()
+        task_guidance = self._get_task_specific_guidance()
         
-        return f"""You are {self.name}, a specialized AI agent with streaming capabilities.
+        return f"""You are {self.name}, a specialized AI agent.
 
 AGENT DETAILS:
 - Name: {self.name}
 - Description: {self.description}  
 - Task Type: {self.task_type}
 - Task Parameters: {json.dumps(self.task_params, indent=2)}
-- Streaming Mode: Enabled (you can think and act incrementally)
 
 MISSION:
-Complete your assigned task systematically using available tools.
-Work step-by-step, use tools when needed, and provide comprehensive results.
+You must complete your assigned task step-by-step using the available tools.
+Work systematically and use tools when appropriate to gather information or perform actions.
 
 AVAILABLE TOOLS:
 {tools_text}
@@ -209,143 +178,128 @@ AVAILABLE TOOLS:
 TASK-SPECIFIC GUIDANCE:
 {task_guidance}
 
-STREAMING WORKFLOW:
-1. Analyze the task and plan your approach
-2. Use tools systematically to gather information
-3. Process each tool result before moving to the next step
-4. Provide incremental updates on your progress
-5. Compile comprehensive final results
+IMPORTANT RULES:
+1. Use tools by including their exact XML format in your responses
+2. Wait for tool results before proceeding to next steps
+3. Be systematic and thorough in your approach
+4. Provide clear summaries of your findings
+5. Complete the task fully before concluding
+6. Use multiple tools if needed to gather comprehensive information
 
-TOOL USAGE RULES:
-- Use tools with their exact XML format
-- Wait for tool results before proceeding
-- Use multiple tools if needed for complete analysis
-- Provide clear analysis of each tool result
+RESPONSE FORMAT:
+- Explain what you're doing
+- Use tools with proper XML syntax
+- Analyze tool results
+- Provide clear conclusions and next steps"""
 
-RESPONSE STYLE:
-- Be systematic and thorough
-- Explain your reasoning at each step
-- Provide clear summaries and conclusions
-- Use professional security/analysis terminology when appropriate"""
-
-    def _get_enhanced_task_guidance(self) -> str:
-        """Get enhanced task-specific guidance."""
+    def _get_task_specific_guidance(self) -> str:
+        """Get task-specific guidance for different task types."""
         guidance_map = {
             "web_search": """
-WEB SEARCH STRATEGY:
-1. Start with broad reconnaissance queries
-2. Use site-specific searches (site:target.com)
-3. Search for security-related information
-4. Look for technology stack information
-5. Search for company/organization details
-6. Compile comprehensive intelligence profile
+For web search tasks:
+1. Start with broad search terms, then refine as needed
+2. Use multiple search queries to get comprehensive information
+3. Analyze search results and extract key information
+4. Look for authoritative sources and recent information
+5. Summarize findings with sources
 
-SEARCH QUERY EXAMPLES:
-- General: "target.com" information company
-- Security: "target.com" security vulnerabilities incidents
-- Technical: "target.com" technology stack infrastructure
-- Files: site:target.com filetype:pdf OR filetype:doc
-- Subdomains: "target.com" subdomain enumeration""",
+Example workflow for domain reconnaissance:
+- Search for basic domain information
+- Search for security-related information
+- Search for technology stack information
+- Compile comprehensive intelligence report""",
             
             "data_analysis": """
-DATA ANALYSIS STRATEGY:
-1. Identify the data type (URL, domain, IP, etc.)
-2. Use appropriate analysis tools (curl for web analysis)
-3. Examine HTTP headers, responses, and security indicators
-4. Look for technology fingerprints and configurations
-5. Analyze security posture and potential issues
-6. Provide actionable intelligence and recommendations
+For data analysis tasks:
+1. First understand the data structure and content
+2. Use appropriate analysis tools based on data type
+3. Look for patterns, trends, and anomalies
+4. Provide statistical insights where relevant
+5. Present findings in clear, actionable format
 
-ANALYSIS FOCUS AREAS:
-- HTTP response headers and security headers
-- Server technology and versions
-- SSL/TLS configuration
-- Content and structure analysis
-- Security indicators and potential vulnerabilities""",
+For domain analysis:
+- Use curl to gather HTTP headers and response information
+- Analyze DNS information if available
+- Check for security headers and configurations""",
             
             "content_creation": """
-CONTENT CREATION STRATEGY:
+For content creation tasks:
 1. Research the topic thoroughly using web search
-2. Gather multiple perspectives and authoritative sources
-3. Structure content logically and professionally
-4. Include specific examples and evidence
-5. Provide actionable recommendations
-6. Format for the intended audience
-
-CONTENT TYPES:
-- Security assessment reports
-- Technical analysis summaries  
-- Intelligence briefings
-- Recommendation documents"""
+2. Gather multiple perspectives and sources
+3. Structure content logically
+4. Include relevant examples and details
+5. Ensure accuracy and completeness""",
+            
+            "calculation": """
+For calculation tasks:
+1. Break down complex problems into steps
+2. Show your work clearly
+3. Verify results when possible
+4. Explain the methodology used"""
         }
         
-        return guidance_map.get(self.task_type, "Complete the assigned task using available tools systematically.")
+        return guidance_map.get(self.task_type, "Complete the assigned task using available tools as needed.")
     
     def _build_detailed_task_message(self) -> str:
         """Build detailed initial task message."""
+        base_message = f"Your task is to perform a {self.task_type} operation."
+        
         if self.task_type == "web_search":
             query = self.task_params.get('query', '')
-            return f"""TASK: Comprehensive Web Search and Intelligence Gathering
+            base_message = f"""Your task is to perform comprehensive web search and analysis.
 
-Target Query: "{query}"
+Search Query: "{query}"
 
-OBJECTIVES:
-1. Perform systematic web reconnaissance
-2. Gather company/organization information
-3. Identify technology stack and infrastructure
-4. Look for security-related information
-5. Compile comprehensive intelligence report
+Please perform the following steps:
+1. Search for general information about the query
+2. If it's a domain/website, search for security-related information
+3. Look for any technical details or background information
+4. Compile a comprehensive report with your findings
 
-APPROACH:
-Use multiple targeted searches with the Web Search tool to gather comprehensive information. Start broad, then get specific based on initial findings."""
+Use the Web Search tool multiple times with different search terms to gather complete information."""
 
         elif self.task_type == "data_analysis":
             data = self.task_params.get('data', '')
             analysis_type = self.task_params.get('analysis_type', 'general')
-            return f"""TASK: Technical Data Analysis
+            base_message = f"""Your task is to perform data analysis.
 
-Target: {data}
+Data: {data}
 Analysis Type: {analysis_type}
 
-OBJECTIVES:
-1. Perform technical analysis of the target
-2. Gather HTTP headers and server information
-3. Identify technology stack and configurations
-4. Assess security posture
-5. Provide actionable intelligence
+Please analyze the provided data systematically:
+1. If it's a URL/domain, use curl to gather HTTP information
+2. Analyze the response headers, status codes, and content
+3. Look for security indicators and technical details
+4. Provide comprehensive analysis and recommendations
 
-APPROACH:
-Use the Curl tool to gather technical information, then analyze the results systematically."""
+Use the Curl tool to gather technical information about the target."""
 
         elif self.task_type == "content_creation":
             topic = self.task_params.get('topic', '')
-            content_type = self.task_params.get('content_type', 'report')
-            return f"""TASK: Content Creation
+            content_type = self.task_params.get('content_type', 'general')
+            base_message = f"""Your task is to create content.
 
 Topic: {topic}
 Content Type: {content_type}
 
-OBJECTIVES:
-1. Research the topic comprehensively
-2. Gather authoritative information
-3. Create well-structured content
-4. Include specific examples and evidence
-5. Provide actionable insights
+Please create comprehensive content:
+1. Research the topic using web search
+2. Gather current information and multiple perspectives  
+3. Structure the content appropriately
+4. Include relevant details and examples
+5. Ensure accuracy and completeness"""
 
-APPROACH:
-Use web search to gather comprehensive information, then create detailed, professional content."""
-
-        return f"Complete the {self.task_type} task with the provided parameters."
+        return base_message
     
     def _execute_task(self) -> Dict[str, Any]:
-        """Execute task with streaming support."""
-        print(f"Agent {self.name} starting execution with streaming...")
+        """Execute the agent's task with proper tool integration."""
+        print(f"Agent {self.name} starting execution...")
         
         if not self._check_server_health():
             raise Exception("API server is not available")
         
-        # Run enhanced streaming conversation loop
-        final_result = self._run_streaming_conversation_loop()
+        # Run enhanced conversation loop
+        final_result = self._run_enhanced_conversation_loop()
         
         return {
             "task_type": self.task_type,
@@ -354,209 +308,107 @@ Use web search to gather comprehensive information, then create detailed, profes
             "final_result": final_result,
             "conversation_length": len(self.conversation_history),
             "tools_used": self.tools_used,
-            "tool_results": self.tool_results,
-            "streaming_chunks": len(self.streaming_chunks)
+            "tool_results": self.tool_results
         }
     
-    def _run_streaming_conversation_loop(self) -> str:
-        """Enhanced streaming conversation loop."""
+    def _run_enhanced_conversation_loop(self) -> str:
+        """Enhanced conversation loop with better tool integration."""
+        max_iterations = 15  # Increased for complex tasks
         iteration = 0
         last_response = ""
-        consecutive_errors = 0
         
-        while iteration < self.max_iterations:
+        while iteration < max_iterations:
             iteration += 1
             print(f"Agent {self.name} - Iteration {iteration}")
             
-            # Rate limiting protection
-            self._enforce_rate_limiting()
-            
+            # Make API call
             try:
-                # Make streaming API call
-                response = self._make_streaming_api_call()
+                response = self._make_api_call()
                 if not response:
-                    consecutive_errors += 1
-                    if consecutive_errors >= 3:
-                        print(f"Agent {self.name} - Too many consecutive errors, stopping")
-                        break
-                    continue
+                    break
                 
-                # Reset error counter on success
-                consecutive_errors = 0
-                self.rate_limit_backoff = 5  # Reset backoff
+                print(f"Agent {self.name} response length: {len(response)}")
+                print(f"Agent {self.name} response preview: {response[:300]}...")
                 
-                print(f"Agent {self.name} - Response length: {len(response)}")
                 self.conversation_history.append({"role": "assistant", "content": response})
                 last_response = response
                 
                 # Process tool usage
-                tool_used = self._process_tool_usage_with_streaming(response)
+                tool_used = self._process_tool_usage(response)
                 
-                # Check for completion
-                if self._check_task_completion(response, iteration, tool_used):
-                    print(f"Agent {self.name} completed task at iteration {iteration}")
-                    break
+                # Check for completion indicators
+                completion_indicators = [
+                    "task completed", "analysis complete", "report complete",
+                    "findings summary", "conclusion", "final results",
+                    "task finished", "no further action needed"
+                ]
+                
+                response_lower = response.lower()
+                task_seems_complete = any(indicator in response_lower for indicator in completion_indicators)
+                
+                if not tool_used:
+                    if task_seems_complete or iteration > 10:
+                        # Agent indicates completion or max iterations reached
+                        print(f"Agent {self.name} completed task (iteration {iteration})")
+                        break
+                    else:
+                        # Encourage tool usage if not used in early iterations
+                        if iteration <= 3:
+                            encouragement = self._get_tool_usage_encouragement()
+                            print(f"Agent {self.name} - Encouraging tool usage")
+                            self.conversation_history.append({"role": "user", "content": encouragement})
+                        else:
+                            # Let agent continue naturally
+                            continue
                 
             except Exception as e:
-                consecutive_errors += 1
                 error_msg = f"Error in iteration {iteration}: {str(e)}"
                 print(f"Agent {self.name} error: {error_msg}")
-                
-                # Handle rate limiting
-                if "rate limit" in str(e).lower() or "429" in str(e):
-                    self._handle_rate_limiting()
-                    continue
-                
-                if consecutive_errors >= 3:
-                    print(f"Agent {self.name} - Too many errors, stopping")
-                    break
-                
-                # Add error context to conversation
-                self.conversation_history.append({
-                    "role": "user", 
-                    "content": f"Error occurred: {error_msg}. Please continue with available information or adjust your approach."
-                })
+                self.conversation_history.append({"role": "user", "content": f"Error occurred: {error_msg}. Please continue with available information."})
+                continue
         
         return last_response or "Task execution completed"
     
-    def _enforce_rate_limiting(self):
-        """Enforce rate limiting between API calls."""
-        current_time = time.time()
-        time_since_last = current_time - self.last_api_call
+    def _get_tool_usage_encouragement(self) -> str:
+        """Get task-specific encouragement to use tools."""
+        if self.task_type == "web_search":
+            query = self.task_params.get('query', 'your assigned topic')
+            return f"""You need to use the Web Search tool to gather information about "{query}". 
+
+Please use this exact format:
+```xml
+<tool>
+  <name>web_search</name>
+  <parameters>
+    <query>{query}</query>
+  </parameters>
+</tool>
+```
+
+Start by searching for general information, then refine your searches based on what you find."""
         
-        if time_since_last < self.min_api_interval:
-            sleep_time = self.min_api_interval - time_since_last
-            print(f"Agent {self.name} - Rate limiting: sleeping {sleep_time:.1f}s")
-            time.sleep(sleep_time)
-    
-    def _handle_rate_limiting(self):
-        """Handle rate limiting with exponential backoff."""
-        print(f"Agent {self.name} - Rate limited, backing off for {self.rate_limit_backoff}s")
-        time.sleep(self.rate_limit_backoff)
+        elif self.task_type == "data_analysis":
+            data = self.task_params.get('data', '')
+            if 'http' in data or '.' in data:  # Looks like a URL/domain
+                return f"""You need to use the Curl tool to analyze "{data}". 
+
+Please use this exact format:
+```xml
+<tool>
+  <n>curl</n>
+  <parameters>
+    <command_id>2</command_id>
+    <target>{data}</target>
+  </parameters>
+</tool>
+```
+
+This will get HTTP headers and basic information about the target."""
         
-        # Exponential backoff
-        self.rate_limit_backoff = min(self.rate_limit_backoff * 2, self.max_backoff)
+        return """You have tools available to help complete your task. Please use the appropriate tools with their exact XML format as shown in the system instructions."""
     
-    def _make_streaming_api_call(self) -> Optional[str]:
-        """Make streaming API call with better error handling."""
-        payload = {
-            "model": self.model,
-            "messages": self.conversation_history,
-            "temperature": 0.7,
-            "max_tokens": self.max_tokens_per_request,
-            "stream": self.use_streaming
-        }
-        
-        try:
-            self.last_api_call = time.time()
-            print(f"Agent {self.name} - Making streaming API call with {len(self.conversation_history)} messages")
-            
-            if self.use_streaming:
-                return self._handle_streaming_response(payload)
-            else:
-                return self._handle_non_streaming_response(payload)
-            
-        except requests.exceptions.Timeout:
-            raise Exception("API call timed out")
-        except requests.exceptions.ConnectionError:
-            raise Exception("Cannot connect to API server")
-        except Exception as e:
-            raise Exception(f"API call failed: {str(e)}")
-    
-    def _handle_streaming_response(self, payload: Dict) -> str:
-        """Handle streaming API response."""
-        try:
-            response = requests.post(
-                f"{self.server_url}/api/chat",
-                json=payload,
-                timeout=self.api_timeout,
-                stream=True,
-                headers={"Content-Type": "application/json"}
-            )
-            
-            if response.status_code != 200:
-                raise Exception(f"API returned status {response.status_code}: {response.text}")
-            
-            # Collect streaming chunks
-            full_content = ""
-            chunk_count = 0
-            
-            for line in response.iter_lines():
-                if line:
-                    line_text = line.decode('utf-8')
-                    if line_text.startswith('data: '):
-                        data_text = line_text[6:]  # Remove 'data: ' prefix
-                        
-                        if data_text == '[DONE]':
-                            break
-                        
-                        try:
-                            chunk_data = json.loads(data_text)
-                            if 'choices' in chunk_data and chunk_data['choices']:
-                                delta = chunk_data['choices'][0].get('delta', {})
-                                content = delta.get('content', '')
-                                if content:
-                                    full_content += content
-                                    chunk_count += 1
-                                    
-                                    # Store chunk for analysis
-                                    self.streaming_chunks.append({
-                                        'content': content,
-                                        'timestamp': time.time(),
-                                        'chunk_number': chunk_count
-                                    })
-                        except json.JSONDecodeError:
-                            continue  # Skip malformed chunks
-            
-            print(f"Agent {self.name} - Received {chunk_count} streaming chunks, total length: {len(full_content)}")
-            return full_content.strip() if full_content else None
-            
-        except Exception as e:
-            print(f"Agent {self.name} - Streaming error: {e}")
-            # Fallback to non-streaming
-            payload["stream"] = False
-            return self._handle_non_streaming_response(payload)
-    
-    def _handle_non_streaming_response(self, payload: Dict) -> str:
-        """Handle non-streaming API response."""
-        response = requests.post(
-            f"{self.server_url}/api/chat",
-            json=payload,
-            timeout=self.api_timeout,
-            headers={"Content-Type": "application/json"}
-        )
-        
-        if response.status_code != 200:
-            raise Exception(f"API returned status {response.status_code}: {response.text}")
-        
-        data = response.json()
-        return self._extract_content(data)
-    
-    def _extract_content(self, response_data: Dict) -> str:
-        """Extract content from API response."""
-        try:
-            if "choices" in response_data and len(response_data["choices"]) > 0:
-                choice = response_data["choices"][0]
-                if "message" in choice and "content" in choice["message"]:
-                    return choice["message"]["content"]
-            
-            if "message" in response_data:
-                if isinstance(response_data["message"], str):
-                    return response_data["message"]
-                elif "content" in response_data["message"]:
-                    return response_data["message"]["content"]
-            
-            for key in ["content", "response", "text"]:
-                if key in response_data and response_data[key]:
-                    return response_data[key]
-            
-            return str(response_data)
-            
-        except Exception as e:
-            raise Exception(f"Could not extract content from response: {e}")
-    
-    def _process_tool_usage_with_streaming(self, response: str) -> bool:
-        """Process tool usage with streaming awareness."""
+    def _process_tool_usage(self, response: str) -> bool:
+        """Process tool usage in agent response with enhanced detection."""
         tool_used = False
         
         # Check each available tool
@@ -565,29 +417,28 @@ Use web search to gather comprehensive information, then create detailed, profes
                 continue
             
             try:
+                # Use tool's detection method
                 command = tool.detect_request(response)
                 if command:
                     print(f"Agent {self.name} - Detected {tool_name} usage: {command}")
                     
-                    # Execute tool with better error handling
-                    tool_result = self._execute_tool_safely(tool, command, tool_name)
+                    # Execute tool
+                    tool_result = tool.execute(command)
+                    print(f"Agent {self.name} - Tool {tool_name} result length: {len(str(tool_result))}")
                     
                     # Track tool usage
                     self.tools_used.append({
                         "tool_name": tool_name,
                         "command": command,
-                        "iteration": len(self.conversation_history),
-                        "timestamp": time.time()
+                        "iteration": len(self.conversation_history)
                     })
-                    
                     self.tool_results.append({
                         "tool_name": tool_name,
                         "result": tool_result,
-                        "iteration": len(self.conversation_history),
-                        "timestamp": time.time()
+                        "iteration": len(self.conversation_history)
                     })
                     
-                    # Add result to conversation
+                    # Add tool result to conversation
                     display_name = getattr(tool, 'friendly_name', tool_name)
                     tool_message = f"Tool '{display_name}' executed successfully.\n\nResults:\n{tool_result}"
                     self.conversation_history.append({"role": "user", "content": tool_message})
@@ -597,91 +448,98 @@ Use web search to gather comprehensive information, then create detailed, profes
                     
             except Exception as e:
                 print(f"Agent {self.name} - Tool {tool_name} error: {e}")
-                self._handle_tool_error(tool_name, str(e))
-                tool_used = True
+                error_message = f"Tool '{tool_name}' encountered an error: {str(e)}\nPlease continue with available information."
+                self.conversation_history.append({"role": "user", "content": error_message})
+                tool_used = True  # Still counts as tool usage attempt
                 break
         
         return tool_used
     
-    def _execute_tool_safely(self, tool, command: Dict[str, Any], tool_name: str) -> str:
-        """Execute tool with comprehensive error handling."""
+    def _make_api_call(self) -> Optional[str]:
+        """Make API call with enhanced error handling."""
+        payload = {
+            "model": self.model,
+            "messages": self.conversation_history,
+            "temperature": 0.7,
+            "max_tokens": 2000,  # Increased for detailed responses
+            "stream": False
+        }
+        
         try:
-            result = tool.execute(command)
-            print(f"Agent {self.name} - Tool {tool_name} executed successfully")
-            return result
+            print(f"Agent {self.name} - Making API call with {len(self.conversation_history)} messages")
+            
+            response = requests.post(
+                f"{self.server_url}/api/chat",
+                json=payload,
+                timeout=45,  # Increased timeout
+                headers={"Content-Type": "application/json"}
+            )
+            
+            if response.status_code != 200:
+                raise Exception(f"API returned status {response.status_code}: {response.text}")
+            
+            data = response.json()
+            content = self._extract_content(data)
+            
+            if not content or content.strip() == "":
+                raise Exception("Empty response from API")
+            
+            return content
+            
+        except requests.exceptions.Timeout:
+            raise Exception("API call timed out after 45 seconds")
+        except requests.exceptions.ConnectionError:
+            raise Exception("Cannot connect to API server")
+        except json.JSONDecodeError:
+            raise Exception("Invalid JSON response from API")
         except Exception as e:
-            error_msg = f"Tool execution failed: {str(e)}"
-            print(f"Agent {self.name} - {error_msg}")
-            raise Exception(error_msg)
+            raise Exception(f"API call failed: {str(e)}")
     
-    def _handle_tool_error(self, tool_name: str, error: str):
-        """Handle tool execution errors gracefully."""
-        display_name = getattr(self.tools.get(tool_name), 'friendly_name', tool_name)
-        error_message = f"Tool '{display_name}' encountered an error: {error}\n\nPlease continue with alternative approaches or available information."
-        self.conversation_history.append({"role": "user", "content": error_message})
-    
-    def _check_task_completion(self, response: str, iteration: int, tool_used: bool) -> bool:
-        """Check if task is completed with improved heuristics."""
-        response_lower = response.lower()
-        
-        # Strong completion indicators
-        strong_indicators = [
-            "task completed", "analysis complete", "report complete",
-            "reconnaissance complete", "findings summary", "final report",
-            "comprehensive analysis complete", "investigation complete"
-        ]
-        
-        # Weak completion indicators (need multiple or context)
-        weak_indicators = [
-            "conclusion", "summary", "final results", "completed successfully",
-            "no further action needed", "task finished"
-        ]
-        
-        # Check for strong indicators
-        if any(indicator in response_lower for indicator in strong_indicators):
-            return True
-        
-        # Check for weak indicators with context
-        weak_count = sum(1 for indicator in weak_indicators if indicator in response_lower)
-        if weak_count >= 2:  # Multiple weak indicators
-            return True
-        
-        # Consider iteration count and tool usage
-        if iteration >= 15 and not tool_used:  # Many iterations without recent tool use
-            return True
-        
-        if iteration >= 20:  # Force completion at high iteration count
-            return True
-        
-        # Check response length - very short responses might indicate completion
-        if len(response.strip()) < 100 and iteration > 5:
-            return True
-        
-        return False
+    def _extract_content(self, response_data: Dict) -> str:
+        """Extract content from API response with better error handling."""
+        try:
+            # Try different response formats
+            if "choices" in response_data and len(response_data["choices"]) > 0:
+                choice = response_data["choices"][0]
+                if "message" in choice and "content" in choice["message"]:
+                    content = choice["message"]["content"]
+                    if content:
+                        return content
+            
+            if "message" in response_data:
+                if isinstance(response_data["message"], str):
+                    return response_data["message"]
+                elif "content" in response_data["message"]:
+                    return response_data["message"]["content"]
+            
+            # Try other common keys
+            for key in ["content", "response", "text"]:
+                if key in response_data and response_data[key]:
+                    return response_data[key]
+            
+            # If all else fails, convert to string
+            return str(response_data)
+            
+        except Exception as e:
+            raise Exception(f"Could not extract content from response: {e}")
     
     def _check_server_health(self) -> bool:
-        """Check if server is available with retry."""
-        for attempt in range(3):
-            try:
-                response = requests.get(f"{self.server_url}/health", timeout=10)
-                if response.status_code == 200:
-                    return True
-            except Exception as e:
-                if attempt < 2:  # Retry
-                    time.sleep(2)
-                    continue
-                print(f"Server health check failed after {attempt + 1} attempts: {e}")
-        return False
+        """Check if server is available."""
+        try:
+            response = requests.get(f"{self.server_url}/health", timeout=10)
+            return response.status_code == 200
+        except Exception as e:
+            print(f"Server health check failed: {e}")
+            return False
 
 
 class EnhancedAgentOrchestrator:
-    """Enhanced orchestrator with better resource management."""
+    """Enhanced orchestrator with better agent management."""
     
     def __init__(self):
         self.agents: Dict[int, BaseAgent] = {}
         self.callbacks: List[Callable] = []
-        self.max_concurrent_agents = 3  # Reduced to prevent resource exhaustion
-        self.agent_cleanup_threshold = 20
+        self.max_concurrent_agents = 5  # Limit concurrent agents
     
     def add_callback(self, callback: Callable):
         """Add callback for agent updates."""
@@ -693,19 +551,15 @@ class EnhancedAgentOrchestrator:
         task_params: Dict[str, Any],
         tools: Dict[str, Any],
         **kwargs
-    ) -> StreamingGenericAgent:
-        """Create enhanced streaming agent."""
+    ) -> EnhancedGenericAgent:
+        """Create and register a new enhanced agent."""
         
         # Check concurrent agents limit
         running_agents = self.get_running_agents()
         if len(running_agents) >= self.max_concurrent_agents:
-            raise Exception(f"Maximum concurrent agents ({self.max_concurrent_agents}) reached. Please wait for completion.")
+            raise Exception(f"Maximum concurrent agents ({self.max_concurrent_agents}) reached. Please wait for some agents to complete.")
         
-        # Cleanup old agents if needed
-        if len(self.agents) > self.agent_cleanup_threshold:
-            self.cleanup_old_agents(self.agent_cleanup_threshold // 2)
-        
-        agent = StreamingGenericAgent(
+        agent = EnhancedGenericAgent(
             task_type=task_type,
             task_params=task_params,
             tools=tools,
@@ -713,9 +567,11 @@ class EnhancedAgentOrchestrator:
         )
         
         self.agents[agent.id] = agent
+        
+        # Add callback to notify orchestrator of agent updates
         agent.add_callback(self._on_agent_update)
         
-        print(f"Created streaming agent {agent.id}: {agent.name} for {task_type}")
+        print(f"Created agent {agent.id}: {agent.name} for {task_type}")
         return agent
     
     def get_agent(self, agent_id: int) -> Optional[BaseAgent]:
@@ -743,33 +599,37 @@ class EnhancedAgentOrchestrator:
         for agent in self.get_running_agents():
             agent.set_status(AgentStatus.FAILED)
             agent.error = "Stopped by orchestrator"
-        print(f"Stopped {len(self.get_running_agents())} running agents")
     
-    def cleanup_old_agents(self, keep_count: int = 10):
+    def cleanup_old_agents(self, max_agents: int = 50):
         """Clean up old agents to prevent memory issues."""
-        if len(self.agents) > keep_count:
+        if len(self.agents) > max_agents:
             # Keep most recent agents
             sorted_agents = sorted(self.agents.items(), key=lambda x: x[1].id, reverse=True)
-            agents_to_keep = dict(sorted_agents[:keep_count])
+            agents_to_keep = dict(sorted_agents[:max_agents])
             removed_count = len(self.agents) - len(agents_to_keep)
             self.agents = agents_to_keep
             print(f"Cleaned up {removed_count} old agents")
     
     def get_agent_statistics(self) -> Dict[str, int]:
         """Get statistics about agents."""
-        return {
+        stats = {
             "total": len(self.agents),
             "running": len(self.get_running_agents()),
             "completed": len(self.get_completed_agents()),
             "failed": len(self.get_failed_agents()),
             "pending": len([a for a in self.agents.values() if a.status == AgentStatus.PENDING])
         }
+        return stats
     
     def _on_agent_update(self, agent: BaseAgent):
         """Handle agent status updates."""
-        print(f"Agent {agent.id} ({agent.name}) status: {agent.status}")
+        print(f"Agent {agent.id} ({agent.name}) status changed to: {agent.status}")
         
-        # Notify callbacks
+        # Cleanup if too many agents
+        if len(self.agents) > 100:
+            self.cleanup_old_agents(50)
+        
+        # Notify orchestrator callbacks
         for callback in self.callbacks:
             try:
                 callback(agent)
@@ -777,8 +637,8 @@ class EnhancedAgentOrchestrator:
                 print(f"Error in orchestrator callback: {e}")
 
 
-class StreamingAgentRegistry:
-    """Enhanced registry for streaming agent creation."""
+class EnhancedAgentRegistry:
+    """Enhanced registry for agent creation with better management."""
     
     def __init__(self):
         self.orchestrator = EnhancedAgentOrchestrator()
@@ -789,8 +649,8 @@ class StreamingAgentRegistry:
         task_params: Dict[str, Any],
         tools: Dict[str, Any] = None,
         **kwargs
-    ) -> StreamingGenericAgent:
-        """Create a new streaming agent."""
+    ) -> EnhancedGenericAgent:
+        """Create a new enhanced agent."""
         return self.orchestrator.create_agent(
             task_type=task_type,
             task_params=task_params,
@@ -804,4 +664,4 @@ class StreamingAgentRegistry:
 
 
 # Global enhanced registry instance
-agent_registry = StreamingAgentRegistry()
+agent_registry = EnhancedAgentRegistry()
