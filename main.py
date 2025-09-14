@@ -1,9 +1,4 @@
-#!/usr/bin/env python3
-"""
-Improved EragAPI Chat Application with Fixed Agent Orchestration.
-Addresses the loop issues, tool awareness, and result management.
-"""
-
+# main.py - Fixed version with proper Moonshot integration
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, filedialog
 import os
@@ -11,17 +6,22 @@ import sys
 import subprocess
 import threading
 import datetime
-import requests
+import requests  # Added for direct API calls
 import json
 import re
 import importlib.util
 from typing import Dict, List, Optional, Any
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Add current directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # Import our improved agent system
 from agents import agent_registry, BaseAgent, AgentStatus
+from moonshot_client import MoonshotClient
 
 
 class ToolLoader:
@@ -74,10 +74,9 @@ class ToolLoader:
 class ImprovedChatInterface(ttk.Frame):
     """Improved chat interface with fixed orchestrator logic."""
     
-    def __init__(self, parent, server_url: str = "http://127.0.0.1:11436"):
+    def __init__(self, parent):
         super().__init__(parent)
-        self.server_url = server_url
-        self.models = {}
+        self.models = []  # Will be populated dynamically
         self.conversation_history = []
         self.tools = {}
         self.tool_buttons = {}
@@ -89,12 +88,43 @@ class ImprovedChatInterface(ttk.Frame):
         self.results_dir = os.path.join("results", "agents")
         os.makedirs(self.results_dir, exist_ok=True)
         
+        # Create Moonshot client
+        self.client = MoonshotClient()
+        
         self.orchestrator = agent_registry.get_orchestrator()
         self.orchestrator.add_callback(self._on_agent_update)
         
         self._build_interface()
-        self._refresh_models()
         self._load_tools()
+        self._refresh_models()  # Fetch models from API
+    
+    def _refresh_models(self):
+        """Refresh available models from Moonshot API."""
+        try:
+            models = self.client.list_models()
+            # Filter out any non-chat models if needed
+            self.models = [model for model in models if "chat" in model.lower() or "moonshot" in model.lower()]
+            
+            if self.models:
+                self.model_combo["values"] = self.models
+                if not self.model_var.get() or self.model_var.get() not in self.models:
+                    self.model_var.set(self.models[0])
+            
+            self._print_message(f"[Models refreshed: {len(self.models)} models loaded]\n", "system")
+        except Exception as e:
+            print(f"Could not refresh models: {e}")
+            self._print_message(f"[Error refreshing models: {str(e)}]\n", "error")
+            
+            # Fallback to comprehensive Moonshot model list
+            self.models = [
+                "moonshot-v1-8k",
+                "moonshot-v1-32k", 
+                "moonshot-v1-128k",
+                "moonshot-v1-auto"
+            ]
+            self.model_combo["values"] = self.models
+            if not self.model_var.get() or self.model_var.get() not in self.models:
+                self.model_var.set("moonshot-v1-32k")
     
     def _build_interface(self):
         """Build the improved interface."""
@@ -105,10 +135,11 @@ class ImprovedChatInterface(ttk.Frame):
         
         # Model selection
         ttk.Label(controls_frame, text="Model:").pack(side="left", padx=(0, 5))
-        self.model_var = tk.StringVar(value="groq-gemma2-9b-it")
+        self.model_var = tk.StringVar(value="moonshot-v1-32k-chat")  # Default value
         self.model_combo = ttk.Combobox(controls_frame, textvariable=self.model_var, width=30)
         self.model_combo.pack(side="left", padx=(0, 5))
         
+        # Add refresh button
         ttk.Button(controls_frame, text="↻", command=self._refresh_models, width=3).pack(side="left", padx=(0, 10))
         
         # Settings
@@ -214,7 +245,7 @@ class ImprovedChatInterface(ttk.Frame):
         self.send_button.pack(side="right", padx=(5, 0))
         
         # Welcome message
-        self._print_message("Welcome to Improved EragAPI Chat with Enhanced Agent Orchestration!\n", "system")
+        self._print_message("Welcome to Enhanced Moonshot Chat with Agent Orchestration!\n", "system")
         self._print_message("The orchestrator will analyze your requests and create specialized agents with proper tool access.\n", "system")
         
     def _load_tools(self):
@@ -252,28 +283,6 @@ class ImprovedChatInterface(ttk.Frame):
         else:
             btn.config(text=f"{display_name} ✗")
             self._print_message(f"[{display_name} DISABLED]\n", "system")
-    
-    def _refresh_models(self):
-        """Refresh available models."""
-        try:
-            resp = requests.get(f"{self.server_url}/api/models", timeout=5)
-            resp.raise_for_status()
-            self.models = resp.json()["models"]
-            
-            model_list = []
-            for provider, models in self.models.items():
-                for model in models:
-                    if "whisper" not in model.lower():
-                        model_list.append(f"{provider}-{model}")
-            
-            if model_list:
-                self.model_combo["values"] = model_list
-                if not self.model_var.get() or self.model_var.get() not in model_list:
-                    self.model_var.set(model_list[0])
-            
-            self._print_message("[Models refreshed]\n", "system")
-        except Exception as e:
-            print(f"Could not refresh models: {e}")
     
     def _print_message(self, text: str, tag: str = ""):
         """Print message to chat display."""
@@ -315,7 +324,7 @@ class ImprovedChatInterface(ttk.Frame):
         threading.Thread(target=self._call_orchestrator_api, daemon=True).start()
     
     def _build_enhanced_orchestrator_prompt(self) -> str:
-        """Build enhanced orchestrator system prompt with tool awareness."""
+        """Build system prompt for generic agent orchestration."""
         enabled_tools = []
         for tool_name, tool in self.tools.items():
             if tool.enabled and tool_name != 'mcp_agent_creator':
@@ -325,76 +334,124 @@ class ImprovedChatInterface(ttk.Frame):
         
         tools_text = "\n".join(enabled_tools) if enabled_tools else "- No tools available"
         
-        return f"""You are a TASK ORCHESTRATOR for specialized agent creation and management.
+        return f"""You are a TASK ORCHESTRATOR for generic agent creation and management.
 
-CORE RESPONSIBILITIES:
-1. Analyze user requests and create appropriate specialized agents
-2. Each agent gets independent conversation context and tool access
-3. Wait for agent completion before responding to user
-4. Provide comprehensive analysis of agent results
-5. Create additional agents if needed based on results
+    CORE RESPONSIBILITIES:
+    1. Analyze user requests and create generic agents with specific instructions
+    2. All agents are identical - only the instructions you provide make them different
+    3. Wait for agent completion before responding to user
+    4. Provide comprehensive analysis of agent results
+    5. Create additional agents if needed based on results
 
-AVAILABLE TOOLS FOR AGENTS:
-{tools_text}
+    AVAILABLE TOOLS FOR AGENTS:
+    {tools_text}
 
-AGENT CREATION RULES:
-- Use the Agent Creator tool with proper XML format
-- Create task-specific agents (web_search, data_analysis, content_creation, etc.)
-- Provide detailed parameters and clear instructions
-- One agent per task, wait for completion before creating more
-- Pass relevant tool access to each agent
+    GENERIC AGENT PRINCIPLES:
+    - There is only ONE type of agent - a generic, multipurpose agent
+    - Agents are specialized ONLY through the detailed instructions you provide
+    - Each agent gets complete tool access and works independently
+    - Instructions should be step-by-step and specific about tool usage
 
-EXAMPLE AGENT CREATION:
-For passive reconnaissance on a domain, create a web_search agent:
-```xml
-<agent>
-  <type>web_search</type>
-  <name>Domain Reconnaissance Agent</name>
-  <description>Gather publicly available information about the target domain</description>
-  <parameters>
-    <query>site:target.com OR "target.com" filetype:pdf OR filetype:doc reconnaissance</query>
-  </parameters>
-</agent>
-```
+    AGENT CREATION FORMAT:
+    ```xml
+    <agent>
+    <n>Descriptive Agent Name</n>
+    <description>Brief description of agent's purpose</description>
+    <instructions>
+        Detailed step-by-step instructions for the agent.
+        
+        Be very specific about:
+        - What information to gather
+        - Which tools to use and how to use them
+        - What searches to perform
+        - What analysis to conduct
+        - How to format results
+    </instructions>
+    </agent>
+    ```
 
-TASK ANALYSIS GUIDELINES:
-- Break complex tasks into multiple specialized agents
-- For reconnaissance: use web search, then analysis, then reporting
-- For research: use web search with multiple specific queries
-- For technical analysis: use appropriate analysis tools
-- Always provide actionable intelligence from results
+    EXAMPLE FOR IP RANGE ANALYSIS:
+    ```xml
+    <agent>
+    <n>Network Analysis Agent</n>
+    <description>Find IP ranges and network details for target domain</description>
+    <instructions>
+        Your mission is to find comprehensive network information for bcr.ro.
+        
+        Execute these steps:
+        1. Use Web Search tool to search: "bcr.ro IP range CIDR netblock ASN"
+        2. Search for: "bcr.ro hosting provider network information"
+        3. Search for: "bcr.ro server locations IP addresses"
+        4. Use Curl tool to get headers from https://bcr.ro and analyze server details
+        5. Compile all findings into a detailed network intelligence report
+        
+        Focus on: IP ranges, CIDR blocks, ASN numbers, hosting providers, geographic locations.
+    </instructions>
+    </agent>
+    ```
 
-RESPONSE FORMAT:
-1. Acknowledge the task
-2. Create appropriate agent(s)
-3. Wait for results
-4. Analyze and summarize findings
-5. Suggest next steps if needed
+    EXAMPLE FOR PASSIVE RECONNAISSANCE:
+    ```xml
+    <agent>
+    <n>Reconnaissance Agent</n>
+    <description>Perform passive information gathering on target domain</description>
+    <instructions>
+        Conduct comprehensive passive reconnaissance on bcr.ro.
+        
+        Tasks to complete:
+        1. Web Search: "site:bcr.ro" to find all indexed pages
+        2. Web Search: "site:bcr.ro filetype:pdf OR filetype:doc" for documents
+        3. Web Search: "bcr.ro employees contacts directory"
+        4. Web Search: "bcr.ro technology stack framework server"
+        5. Use Curl to analyze https://bcr.ro headers and response
+        6. Create comprehensive reconnaissance report with all findings
+        
+        Gather only publicly available information.
+    </instructions>
+    </agent>
+    ```
 
-Never perform tasks yourself - always delegate to specialized agents."""
+    INSTRUCTION GUIDELINES:
+    - Be extremely detailed and specific in your instructions
+    - Tell agents exactly which tools to use and how
+    - Specify the exact search terms to use
+    - Define the expected output format
+    - Break complex tasks into clear sequential steps
+
+    ERROR HANDLING:
+    - If agent creation fails, analyze the error and correct the XML format
+    - Ensure instructions are clear and actionable
+    - Always wait for agent completion before responding
+
+    RESPONSE WORKFLOW:
+    1. Acknowledge user request
+    2. Create agent with detailed, specific instructions
+    3. Wait for agent completion
+    4. Analyze and summarize results
+    5. Create additional agents if more information needed
+
+    Never perform tasks yourself - always create agents with comprehensive instructions."""
 
     def _call_orchestrator_api(self):
-        """Call API for orchestrator with improved error handling."""
+        """Call Moonshot API for orchestrator with improved error handling."""
         try:
+            # Update model from UI selection
+            self.client.model = self.model_var.get()
+            
             payload = {
-                "model": self.model_var.get(),
                 "messages": self.conversation_history,
                 "temperature": self.temp_var.get(),
                 "max_tokens": self.max_tokens_var.get(),
                 "stream": False
             }
             
-            response = requests.post(f"{self.server_url}/api/chat", json=payload, timeout=60)
-            response.raise_for_status()
+            response = self.client.chat(**payload)
             
-            data = response.json()
-            ai_response = self._extract_content(data)
-            
-            self._print_message(f"Orchestrator: {ai_response}\n", "assistant")
-            self.conversation_history.append({"role": "assistant", "content": ai_response})
+            self._print_message(f"Orchestrator: {response}\n", "assistant")
+            self.conversation_history.append({"role": "assistant", "content": response})
             
             # Process tool requests (should only be Agent Creator)
-            agent_created = self._process_agent_creation(ai_response)
+            agent_created = self._process_agent_creation(response)
             
             if not agent_created:
                 # No agent creation detected - orchestrator provided direct response
@@ -428,7 +485,7 @@ Never perform tasks yourself - always delegate to specialized agents."""
         return str(response_data)
     
     def _process_agent_creation(self, ai_response: str) -> bool:
-        """Process agent creation requests from orchestrator."""
+        """Process agent creation requests with enhanced error handling."""
         agent_creator = self.tools.get('mcp_agent_creator')
         if not agent_creator or not agent_creator.enabled:
             return False
@@ -443,7 +500,36 @@ Never perform tasks yourself - always delegate to specialized agents."""
             tool_result = agent_creator.execute(command)
             self._print_message(f"[Agent Creator: {tool_result}]\n", "agent_update")
             
-            # Extract agent ID and wait for completion
+            # CHECK FOR ERRORS - This is the key addition
+            if "Error:" in tool_result or "Missing required parameter" in tool_result:
+                # Agent creation failed - add error to conversation for orchestrator to see
+                error_message = (
+                    f"AGENT CREATION FAILED: {tool_result}\n\n"
+                    f"ERROR CORRECTION REQUIRED:\n"
+                    f"The agent creation failed due to incorrect parameters. "
+                    f"Please create a corrected agent using proper parameter format:\n\n"
+                    f"For IP range analysis of bcr.ro, use data_analysis agent:\n"
+                    f'<agent>\n'
+                    f'  <type>data_analysis</type>\n'
+                    f'  <n>IP Analysis Agent</n>\n'
+                    f'  <description>Analyze IP range for bcr.ro</description>\n'
+                    f'  <parameters>\n'
+                    f'    <data>bcr.ro</data>\n'
+                    f'    <analysis_type>ip_analysis</analysis_type>\n'
+                    f'  </parameters>\n'
+                    f'</agent>\n\n'
+                    f"CRITICAL: data_analysis agents require <data>target</data> parameter, not target_domain!"
+                )
+                
+                # Add to conversation so orchestrator can see the error and retry
+                self.conversation_history.append({"role": "user", "content": error_message})
+                
+                # Continue orchestrator processing to handle the error
+                self.send_button.config(text="Correcting...")
+                threading.Thread(target=self._call_orchestrator_api, daemon=True).start()
+                return True
+            
+            # Extract agent ID and wait for completion (existing code)
             agent_id_match = re.search(r'Agent ID: (\d+)', tool_result)
             if agent_id_match:
                 agent_id = int(agent_id_match.group(1))
@@ -452,7 +538,7 @@ Never perform tasks yourself - always delegate to specialized agents."""
                 self.status_label.config(text="Agent Working...", foreground="blue")
                 threading.Thread(target=self._wait_for_agent_completion, args=(agent_id,), daemon=True).start()
                 return True
-            
+                
         except Exception as e:
             self._print_message(f"[Error creating agent: {str(e)}]\n", "error")
             import traceback
@@ -520,6 +606,9 @@ Never perform tasks yourself - always delegate to specialized agents."""
     def _save_agent_results(self, agent: BaseAgent):
         """Save agent results to file."""
         try:
+            # Ensure the results directory exists
+            os.makedirs(self.results_dir, exist_ok=True)
+            
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             safe_name = re.sub(r'[^\w\s-]', '', agent.name).strip()
             safe_name = re.sub(r'[-\s]+', '-', safe_name)
@@ -779,10 +868,8 @@ class MainApplication(tk.Tk):
     
     def __init__(self):
         super().__init__()
-        self.title("Enhanced EragAPI Chat with Fixed Agent Orchestration")
+        self.title("Enhanced Moonshot Chat with Agent Orchestration")
         self.geometry("1400x900")
-        
-        self.server_process = None
         
         # Create main interface
         self.chat_interface = ImprovedChatInterface(self)
@@ -793,9 +880,6 @@ class MainApplication(tk.Tk):
         
         # Bind close event
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
-        
-        # Try to refresh models on startup
-        self.after(1000, self.chat_interface._refresh_models)
     
     def _create_menu(self):
         """Create enhanced application menu."""
@@ -810,13 +894,10 @@ class MainApplication(tk.Tk):
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.on_closing)
         
-        # Server menu  
-        server_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Server", menu=server_menu)
-        server_menu.add_command(label="Start Server", command=self.start_server)
-        server_menu.add_command(label="Stop Server", command=self.stop_server)
-        server_menu.add_separator()
-        server_menu.add_command(label="Refresh Models", command=self.chat_interface._refresh_models)
+        # Model menu
+        model_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Model", menu=model_menu)
+        model_menu.add_command(label="Refresh Models", command=self.chat_interface._refresh_models)
         
         # Agents menu
         agents_menu = tk.Menu(menubar, tearoff=0)
@@ -829,84 +910,7 @@ class MainApplication(tk.Tk):
         menubar.add_cascade(label="Help", menu=help_menu)
         help_menu.add_command(label="About", command=self.show_about)
         help_menu.add_command(label="Troubleshooting", command=self.show_troubleshooting)
-    
-    def start_server(self):
-        """Start EragAPI server with enhanced monitoring."""
-        if self.server_process and self.server_process.poll() is None:
-            self.chat_interface._print_message("[Server is already running]\n", "system")
-            return
-        
-        # Check if port is already in use
-        try:
-            import socket
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            result = sock.connect_ex(('127.0.0.1', 11436))
-            sock.close()
-            if result == 0:
-                self.chat_interface._print_message("[Port 11436 is already in use. Server may already be running elsewhere.]\n", "system")
-                self.chat_interface._print_message("[Try using the existing server or stop it first.]\n", "system")
-                self.chat_interface._refresh_models()
-                return
-        except:
-            pass
-        
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        server_script = os.path.join(script_dir, "eragAPI.py")
-        
-        if not os.path.exists(server_script):
-            self.chat_interface._print_message(f"[eragAPI.py not found at {server_script}]\n", "error")
-            return
-        
-        try:
-            self.server_process = subprocess.Popen(
-                [sys.executable, server_script, "serve"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                cwd=script_dir
-            )
-            
-            self.chat_interface._print_message("[Starting server...]\n", "system")
-            
-            # Monitor server output
-            def monitor_server():
-                try:
-                    for line in self.server_process.stdout:
-                        line = line.strip()
-                        if line:
-                            self.chat_interface._print_message(f"[SERVER] {line}\n", "system")
-                            
-                            if "Application startup complete" in line:
-                                def delayed_refresh():
-                                    import time
-                                    time.sleep(2)
-                                    try:
-                                        self.chat_interface._refresh_models()
-                                    except:
-                                        pass
-                                threading.Thread(target=delayed_refresh, daemon=True).start()
-                    
-                    self.chat_interface._print_message("[Server process ended]\n", "system")
-                    self.server_process = None
-                except Exception as e:
-                    self.chat_interface._print_message(f"[Error monitoring server: {e}]\n", "error")
-            
-            threading.Thread(target=monitor_server, daemon=True).start()
-            
-        except Exception as e:
-            self.chat_interface._print_message(f"[Error starting server: {e}]\n", "error")
-    
-    def stop_server(self):
-        """Stop server and all agents."""
-        if self.server_process and self.server_process.poll() is None:
-            self.server_process.terminate()
-            self.chat_interface._print_message("[Server stopped]\n", "system")
-        else:
-            self.chat_interface._print_message("[Server not running]\n", "system")
-        
-        # Also stop all agents
-        self.chat_interface.stop_all_agents()
-    
+       
     def open_results_folder(self):
         """Open the results folder in file explorer."""
         results_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
@@ -917,6 +921,7 @@ class MainApplication(tk.Tk):
                 subprocess.run(['xdg-open', results_dir])
         except Exception as e:
             messagebox.showerror("Error", f"Could not open results folder: {e}")
+    
     
     def show_about(self):
         """Show enhanced about dialog."""
@@ -957,9 +962,9 @@ Common Issues:
    - Agents now receive proper tool instructions
 
 3. Server Connection Issues:
-   - Use "Start Server" from Server menu
-   - Check that port 11436 is not blocked
-   - Verify API keys are set in environment
+   - Fixed: Now uses direct Moonshot API connection
+   - Check that MOONSHOT_API_KEY is set in .env file
+   - Verify API key is valid
 
 4. Missing Results:
    - Results are saved to results/agents/
@@ -971,15 +976,18 @@ Common Issues:
    - Clear chat periodically
    - Reduce max tokens if responses are slow
 
+6. Model Loading Issues:
+   - Use the refresh button (↻) to reload models
+   - Check your internet connection
+   - Verify MOONSHOT_API_KEY is correct
+
 For more help, check the console output or log files."""
         messagebox.showinfo("Troubleshooting", troubleshooting_text)
     
     def on_closing(self):
         """Handle application closing."""
-        # Stop all agents and server
+        # Stop all agents
         self.chat_interface.stop_all_agents()
-        if self.server_process and self.server_process.poll() is None:
-            self.server_process.terminate()
         
         # Save current state if there's conversation history
         if self.chat_interface.conversation_history:

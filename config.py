@@ -1,12 +1,16 @@
+# config.py
 """
-Configuration settings for the simplified EragAPI application.
+Configuration settings for the Moonshot-based EragAPI application.
 """
 
 import os
+from dotenv import load_dotenv
 
-# Server Configuration
-DEFAULT_SERVER_URL = "http://127.0.0.1:11436"
-DEFAULT_MODEL = "groq-gemma2-9b-it"
+# Load environment variables from .env file
+load_dotenv()
+
+# Model Configuration
+DEFAULT_MODEL = "moonshot-v1-32k-chat"
 API_TIMEOUT = 60
 
 # GUI Configuration
@@ -45,13 +49,6 @@ COLORS = {
     "error": "#cc0000",
     "success": "#00cc00"
 }
-
-# Available Models (fallback if server is unavailable)
-FALLBACK_MODELS = [
-    "groq-gemma2-9b-it",
-    "groq-mixtral-8x7b-32768",
-    "groq-llama2-70b-4096"
-]
 
 # Agent Types and Descriptions
 AGENT_TYPES = {
@@ -92,6 +89,6 @@ TOOL_SETTINGS = {
     "curl": {
         "default_timeout": 30,
         "max_redirects": 5,
-        "user_agent": "EragAPI-SimplifiedClient/2.0"
+        "user_agent": "MoonshotDirectClient/3.0"
     }
 }
