@@ -58,62 +58,18 @@ class MoonshotClient:
             raise Exception(f"JSON decode error: {str(e)}")
     
     def list_models(self) -> List[str]:
-        """List available models from Moonshot API using the same approach as eragAPI."""
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-        
+        """Return the live Moonshot model catalogue."""
+        headers = {"Authorization": f"Bearer {self.api_key}"}
         try:
-            # Try to get models from the API first
-            response = requests.get(
-                f"{self.base_url}/models", 
-                headers=headers,
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                model_ids = [model.get("id") for model in data.get("data", [])]
-                if model_ids:
-                    return model_ids
-            
-            # If models endpoint doesn't work, try a test chat completion to verify API key
-            test_payload = {
-                "model": "moonshot-v1-32k",
-                "messages": [{"role": "user", "content": "Hello"}],
-                "max_tokens": 5
-            }
-            
-            test_response = requests.post(
-                f"{self.base_url}/chat/completions",
-                headers=headers,
-                json=test_payload,
-                timeout=10
-            )
-            
-            # If the API key works, return comprehensive model list
-            if test_response.status_code == 200:
-                return [
-                    "moonshot-v1-8k",
-                    "moonshot-v1-32k", 
-                    "moonshot-v1-128k",
-                    "moonshot-v1-auto"
-                    "kimi-k2-0905-preview"
-                ]
-                
-        except requests.exceptions.RequestException as e:
-            print(f"Request error during model listing: {e}")
-        except json.JSONDecodeError as e:
-            print(f"JSON decode error during model listing: {e}")
+            resp = requests.get(f"{self.base_url}/models", headers=headers, timeout=10)
+            resp.raise_for_status()
+            return [m["id"] for m in resp.json()["data"]]
         except Exception as e:
-            print(f"General error during model listing: {e}")
-        
-        # Return fallback models if all else fails
-        return [
-            "moonshot-v1-8k",
-            "moonshot-v1-32k", 
-            "moonshot-v1-128k",
-            "moonshot-v1-auto"
-            "kimi-k2-0905-preview"
-        ]
+            print(f"[Moonshot] /models failed ({e}) — using fallback")
+            # Last-resort fallback (the 12-model set you just confirmed)
+            return [
+                "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k", "moonshot-v1-auto",
+                "kimi-k2-0711-preview", "kimi-k2-turbo-preview", "kimi-k2-0905-preview",
+                "kimi-latest", "moonshot-v1-8k-vision-preview", "moonshot-v1-32k-vision-preview",
+                "moonshot-v1-128k-vision-preview", "kimi-thinking-preview"
+            ]

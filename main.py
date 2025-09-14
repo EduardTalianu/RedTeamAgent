@@ -99,32 +99,28 @@ class ImprovedChatInterface(ttk.Frame):
         self._refresh_models()  # Fetch models from API
     
     def _refresh_models(self):
-        """Refresh available models from Moonshot API."""
         try:
-            models = self.client.list_models()
-            # Filter out any non-chat models if needed
-            self.models = [model for model in models if "chat" in model.lower() or "moonshot" in model.lower()]
-            
-            if self.models:
+            models = self.client.list_models()          # ← real call
+            if models:                                  # ← we got 12
+                self.models = models
                 self.model_combo["values"] = self.models
                 if not self.model_var.get() or self.model_var.get() not in self.models:
                     self.model_var.set(self.models[0])
-            
-            self._print_message(f"[Models refreshed: {len(self.models)} models loaded]\n", "system")
+                self._print_message(f"[Models refreshed: {len(self.models)} models loaded]\n", "system")
+                return                                  # ← SUCCESS: leave early
         except Exception as e:
             print(f"Could not refresh models: {e}")
-            self._print_message(f"[Error refreshing models: {str(e)}]\n", "error")
-            
-            # Fallback to comprehensive Moonshot model list
-            self.models = [
-                "moonshot-v1-8k",
-                "moonshot-v1-32k", 
-                "moonshot-v1-128k",
-                "moonshot-v1-auto"
-            ]
-            self.model_combo["values"] = self.models
-            if not self.model_var.get() or self.model_var.get() not in self.models:
-                self.model_var.set("moonshot-v1-32k")
+            # self._print_message(f"[Error refreshing models: {str(e)}]\n", "error")
+            # ↓↓↓  REMOVE THESE LINES – they overwrite the real list  ↓↓↓
+            # self.models = [
+            #     "moonshot-v1-8k",
+            #     "moonshot-v1-32k",
+            #     "moonshot-v1-128k",
+            #     "moonshot-v1-auto"
+            # ]
+            # self.model_combo["values"] = self.models
+            # if not self.model_var.get() or self.model_var.get() not in self.models:
+            #     self.model_var.set("moonshot-v1-32k")
     
     def _build_interface(self):
         """Build the improved interface."""
